@@ -48,7 +48,6 @@ extern "C" {
 #include "common_config.h"
 #include "face_embedding_protocol.h"
 #include "WE2_core.h"  /* SCB_InvalidateDCache_by_Addr */
-void cisdp_get_jpginfo(uint32_t *jpeg_enc_filesize, uint32_t *jpeg_enc_addr);
 }
 #include "send_result.h"
 
@@ -131,22 +130,12 @@ private:
 
     void event_reply(const struct_algoResult& algo_result,
                      const face_embedding_msg_t& embedding_result,
-                     int width, int height) {
-        /* Get JPEG image from DP pipeline */
-        uint32_t jpeg_size = 0;
-        uint32_t jpeg_addr = 0;
-        cisdp_get_jpginfo(&jpeg_size, &jpeg_addr);
-
-        el_img_t jpeg_img = {};
-        el_img_t* jpeg_ptr = nullptr;
-        if (jpeg_addr && jpeg_size > 0) {
-            jpeg_img.data = (uint8_t*)jpeg_addr;
-            jpeg_img.size = jpeg_size;
-            jpeg_img.width = width;
-            jpeg_img.height = height;
-            jpeg_img.format = EL_PIXEL_FORMAT_JPEG;
-            jpeg_ptr = &jpeg_img;
-        }
+                     int width, int height,
+                     const el_img_t& jpeg_frame) {
+        /* Use JPEG frame obtained from sscma_micro's camera driver
+         * (via get_processed_frame) before stop_stream was called */
+        el_img_t jpeg_img = jpeg_frame;
+        el_img_t* jpeg_ptr = (jpeg_img.data && jpeg_img.size > 0) ? &jpeg_img : nullptr;
 
         /* Build JSON response */
         std::string response = concat_strings(
@@ -233,6 +222,13 @@ private:
             SCB_InvalidateDCache_by_Addr((uint32_t*)frame.data, frame.size);
         }
 
+        /* Get JPEG frame from sscma_micro's DP pipeline BEFORE stop_stream.
+         * Must use camera->get_processed_frame() which reads from the correct
+         * WDMA2 address (SRAM2), not cisdp_get_jpginfo() which reads from
+         * the face mode's unused SRAM0 addresses. */
+        el_img_t jpeg_frame = {};
+        camera->get_processed_frame(&jpeg_frame);
+
         /* Run face detection + embedding on the YUV422P frame */
         struct_algoResult algo_result = {};
         face_embedding_msg_t embedding_result = {};
@@ -249,7 +245,7 @@ private:
         int width = frame.width;
         int height = frame.height;
 
-        event_reply(algo_result, embedding_result, width, height);
+        event_reply(algo_result, embedding_result, width, height, jpeg_frame);
 
         /* Schedule next iteration */
         static_resource->executor->add_task(
