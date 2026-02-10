@@ -17,9 +17,11 @@ This repository contains firmware examples for the Seeed Grove Vision AI Module 
 **Standard Build Flow:**
 ```bash
 cd EPII_CM55M_APP_S
-make clean
-make
+gmake clean
+gmake -j8
 ```
+
+> **Note:** On macOS, you must use `gmake` (GNU Make) instead of `make` (BSD Make). Install with `brew install make`.
 
 **Selecting a Scenario Application:**
 Edit `EPII_CM55M_APP_S/makefile` and change the `APP_TYPE` variable:
@@ -286,7 +288,7 @@ LIB_*_DEFINES = [compilation defines]
 7. **Build and test:**
    ```bash
    cd EPII_CM55M_APP_S
-   make clean && make
+   gmake clean && gmake -j8
    ```
 
 ## Working with TensorFlow Lite Models
@@ -340,15 +342,16 @@ python3 xmodem/xmodem_send.py \
 ### Platform-Specific Build Requirements
 
 **Linux:**
-- Requires: `make`, ARM GNU Toolchain v13.2+
-- Install: `sudo apt install make`
+- Requires: GNU Make (`make`), ARM GNU Toolchain v13.2+
+- Install: `sudo apt install make` (provides GNU Make by default)
+- On Linux, `make` is GNU Make, so `make` and `gmake` are equivalent
 - Download toolchain: `arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz`
 
 **macOS:**
-- Must use GNU `make`, not BSD `make`
-- Check version: `make --version` (should show "GNU Make")
-- Install if needed: `brew install make` (accessible as `gmake`)
-- Add alias: `alias make='gmake'` in `.zshrc` or `.bash_profile`
+- **MUST use `gmake` (GNU Make)**, not `make` (BSD Make)
+- Install: `brew install make` (provides `gmake` command)
+- Check version: `gmake --version` (should show "GNU Make 4.x")
+- All build commands in this document use `gmake` explicitly
 - Use macOS-specific image generator: `we2_local_image_gen_macOS_arm64`
 
 **Windows:**
@@ -503,6 +506,86 @@ python3 xmodem/xmodem_send.py \
 # Access via: https://seeed-studio.github.io/SenseCraft-Web-Toolkit
 ```
 
+## SSCMA Face Recognition Firmware (SenseCap Watcher)
+
+### Building for SenseCap Watcher
+
+The `sscma_face` scenario app requires a specific linker script for SenseCap Watcher devices. Use the `TARGET` variable:
+
+```bash
+cd EPII_CM55M_APP_S
+TARGET=SENSECAP_WATCHER gmake clean
+TARGET=SENSECAP_WATCHER gmake -j8
+```
+
+**Important:**
+- On macOS, use `gmake` (GNU Make) instead of `make` (BSD Make)
+- Without `TARGET=SENSECAP_WATCHER`, the build will fail with memory overflow errors
+
+### Generating Firmware Image
+
+```bash
+cd we2_image_gen_local
+
+# Copy ELF file
+cp ../EPII_CM55M_APP_S/obj_epii_evb_icv30_bdv10/gnu_epii_evb_WLCSP65/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf input_case1_secboot/
+
+# Generate image (macOS)
+./we2_local_image_gen_macOS_arm64 project_case1_blp_wlcsp.json
+```
+
+**Output:** `output_case1_sec_wlcsp/output.img`
+
+### Safe Flashing (ESP32 + Himax Dual-Chip System)
+
+When the Himax chip is paired with an ESP32 (like in SenseCap Watcher), the ESP32 firmware may interfere with Himax flashing. Use the safe flashing script:
+
+```bash
+# Install uv if not already installed
+# brew install uv
+
+# Run safe flash script (holds ESP32 in reset during flash)
+cd /Users/harvest/project/grove_vision_2/sscma-example-we2
+uv run python flash_himax_safe.py
+```
+
+**Port Configuration (SenseCap Watcher):**
+- Himax: `/dev/cu.usbmodem5AF91659651` (port ending in 51)
+- ESP32: `/dev/cu.wchusbserial5AF91659653` (port ending in 53)
+
+The `flash_himax_safe.py` script:
+1. Holds ESP32 in reset via DTR/RTS pins
+2. Flashes Himax firmware using sscma.cli flasher
+3. Releases ESP32 to boot normally
+
+### Testing Face Recognition via Serial
+
+After flashing, connect to Himax serial port at 921600 baud:
+
+```bash
+# macOS
+screen /dev/cu.usbmodem5AF91659651 921600
+```
+
+**Test Commands:**
+```
+AT+FACE=1          # Enable face mode (returns {"face_mode": true})
+AT+INVOKE=-1,0,1   # Start inference (should return face data)
+AT+FACE=0          # Disable face mode
+AT+BREAK           # Stop inference
+```
+
+### Copying Firmware to ESP32 Project
+
+For ESP32 integration, copy the generated image:
+
+```bash
+cp we2_image_gen_local/output_case1_sec_wlcsp/output.img \
+   /path/to/xiaozhi-esp32/main/boards/sensecap-watcher/app_collaboration/himax_firmware.img
+```
+
+---
+
 ## Common Development Workflows
 
 ### One-Click Build and Flash (Recommended)
@@ -536,7 +619,7 @@ cd EPII_CM55M_APP_S
 # Edit makefile: APP_TYPE = tflm_yolov8_od
 
 # 2. Build
-make clean && make
+gmake clean && gmake -j8
 
 # 3. Generate image
 cd ../we2_image_gen_local
@@ -562,7 +645,7 @@ python3 xmodem/xmodem_send.py \
 
 # Rebuild
 cd EPII_CM55M_APP_S
-make clean && make
+gmake clean && gmake -j8
 # Then generate image and flash as usual
 ```
 
@@ -575,7 +658,7 @@ make clean && make
 # Set: APP_TYPE = allon_sensor_tflm_freertos
 
 # Rebuild
-make clean && make
+gmake clean && gmake -j8
 ```
 
 ### Workflow: Flash Multiple Models
