@@ -1,0 +1,15 @@
+[project]
+name = "xmodem-flasher"
+version = "1.0.0"
+description = "Himax WE2 xmodem flash tools for SenseCAP Watcher"
+requires-python = ">=3.10"
+dependencies = [
+    "xmodem>=0.4.7",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+flash-watcher = "flash_watcher:main"
+
+[tool.uv]
+dev-dependencies = []

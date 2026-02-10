@@ -1,0 +1,40 @@
+version = 1
+revision = 2
+requires-python = ">=3.10"
+
+[[package]]
+name = "pyserial"
+version = "3.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125, upload-time = "2020-11-23T03:59:15.045Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585, upload-time = "2020-11-23T03:59:13.41Z" },
+]
+
+[[package]]
+name = "xmodem"
+version = "0.4.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3d/17/fd6668a09afdc46c22990172b6f65e07dfb5bcf38960d063a7a887ca926d/xmodem-0.4.7.tar.gz", hash = "sha256:2f1068aa8676f0d1d112498b5786c4f8ea4f89d8f25d07d3a0f293cd21db1c35", size = 34052, upload-time = "2023-06-11T18:02:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/67/6b/371c541d67e926d7e87e47aaa7117f8d30ac13dd16e64f9ac2ffdcdead44/xmodem-0.4.7-py2.py3-none-any.whl", hash = "sha256:0842d2266175f01225053db721ea952b3f4b239cb3ace83c32b1daf90aa413af", size = 35626, upload-time = "2023-06-11T18:02:38.583Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/1a/e383b538450963953d4e652d2bce0a4cfbcf15ecc8c34ab998bd1329c95d/xmodem-0.4.7-py3-none-any.whl", hash = "sha256:e6a2c7608f7b187da786c47780f8407dbc4ac2d3dfeb34fe683cc19778f01360", size = 35689, upload-time = "2023-06-11T18:02:40.845Z" },
+]
+
+[[package]]
+name = "xmodem-flasher"
+version = "1.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "pyserial" },
+    { name = "xmodem" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pyserial", specifier = ">=3.5" },
+    { name = "xmodem", specifier = ">=0.4.7" },
+]
+
+[package.metadata.requires-dev]
+dev = []
