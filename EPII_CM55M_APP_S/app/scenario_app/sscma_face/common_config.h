@@ -93,7 +93,7 @@
 #define ALIGNED_FACE_BUFFER_SIZE        (112 * 112 * 3)
 
 /* Face detection thresholds */
-#define FACE_CONF_THRESHOLD             0.70f   /* Confidence threshold for face detection */
+#define FACE_CONF_THRESHOLD             0.40f   /* Confidence threshold (lowered: Vela model logits via sigmoid) */
 #define FACE_NMS_THRESHOLD              0.4f    /* NMS IoU threshold */
 #define MIN_FACE_SIZE                   40      /* Minimum face size in pixels */
 

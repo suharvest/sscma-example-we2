@@ -55,6 +55,18 @@ namespace sscma::callback {
 
 using namespace sscma::utility;
 
+/* Format float without %f (newlib-nano doesn't support float formatting).
+ * Writes "[-]int.frac" with 'decimals' digits after the point. */
+static int fmt_fixed(char* buf, int size, float val, int decimals) {
+    int neg = (val < 0);
+    if (neg) val = -val;
+    int mult = 1;
+    for (int d = 0; d < decimals; d++) mult *= 10;
+    int scaled = (int)(val * mult + 0.5f);
+    return snprintf(buf, size, "%s%d.%0*d",
+                    neg ? "-" : "", scaled / mult, decimals, scaled % mult);
+}
+
 class FaceInvoke final : public std::enable_shared_from_this<FaceInvoke> {
 public:
     std::shared_ptr<FaceInvoke> getptr() { return shared_from_this(); }
@@ -156,28 +168,33 @@ private:
 
         /* Add faces array */
         if (algo_result.num_tracked_human_targets > 0) {
-            /* Build face JSON with embedding */
+            /* Build face JSON with embedding.
+             * Uses fmt_fixed() instead of %f because newlib-nano
+             * doesn't support float formatting in snprintf. */
             char face_buf[4096];  // Enough for one face with 128D embedding
             int len = snprintf(face_buf, sizeof(face_buf),
-                ", \"faces\": [{\"box\": [%d, %d, %d, %d], \"score\": %d, \"quality\": %.2f, "
-                "\"landmarks\": [[%d, %d], [%d, %d], [%d, %d], [%d, %d], [%d, %d]], "
-                "\"embedding\": [",
+                ", \"faces\": [{\"box\": [%d, %d, %d, %d], \"score\": %d, \"quality\": ",
                 embedding_result.bbox.x, embedding_result.bbox.y,
                 embedding_result.bbox.width, embedding_result.bbox.height,
-                (int)(embedding_result.confidence * 100),
-                embedding_result.quality,
+                (int)(embedding_result.confidence * 100));
+            len += fmt_fixed(face_buf + len, sizeof(face_buf) - len,
+                             embedding_result.quality, 2);
+            len += snprintf(face_buf + len, sizeof(face_buf) - len,
+                ", \"landmarks\": [[%d, %d], [%d, %d], [%d, %d], [%d, %d], [%d, %d]], "
+                "\"embedding\": [",
                 (int)embedding_result.landmarks[0].x, (int)embedding_result.landmarks[0].y,
                 (int)embedding_result.landmarks[1].x, (int)embedding_result.landmarks[1].y,
                 (int)embedding_result.landmarks[2].x, (int)embedding_result.landmarks[2].y,
                 (int)embedding_result.landmarks[3].x, (int)embedding_result.landmarks[3].y,
-                (int)embedding_result.landmarks[4].x, (int)embedding_result.landmarks[4].y
-            );
+                (int)embedding_result.landmarks[4].x, (int)embedding_result.landmarks[4].y);
 
-            /* Add embedding values */
+            /* Add embedding values using fmt_fixed (no %f) */
             for (int i = 0; i < EMBEDDING_OUTPUT_DIM; i++) {
-                len += snprintf(face_buf + len, sizeof(face_buf) - len,
-                    "%.4f%s", embedding_result.embedding[i],
-                    i < EMBEDDING_OUTPUT_DIM - 1 ? ", " : "");
+                len += fmt_fixed(face_buf + len, sizeof(face_buf) - len,
+                                 embedding_result.embedding[i], 4);
+                if (i < EMBEDDING_OUTPUT_DIM - 1) {
+                    len += snprintf(face_buf + len, sizeof(face_buf) - len, ", ");
+                }
             }
             len += snprintf(face_buf + len, sizeof(face_buf) - len, "]}]");
 

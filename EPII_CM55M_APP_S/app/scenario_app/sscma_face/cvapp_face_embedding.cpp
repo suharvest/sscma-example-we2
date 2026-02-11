@@ -84,7 +84,7 @@ extern struct ethosu_driver _ethosu_drv;
  * 1 = Normal (step timing + key info)
  * 2 = Verbose (all debug info)
  */
-#define DEBUG_VERBOSE 1
+#define DEBUG_VERBOSE 0
 
 #if DEBUG_VERBOSE >= 2
 #define DBG_VERBOSE(fmt, ...) xprintf(fmt, ##__VA_ARGS__)
@@ -529,7 +529,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
             if (rgb[i] < vmin) vmin = rgb[i];
             if (rgb[i] > vmax) vmax = rgb[i];
         }
-        xprintf("[DBG] Frame %d: %dx%d YUV→RGB: min=%d max=%d avg=%d first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+        DBG_INFO("[DBG] Frame %d: %dx%d YUV->RGB: min=%d max=%d avg=%d first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
                 frame_count, img_w, img_h, vmin, vmax, (int)(sum / total),
                 rgb[0], rgb[1], rgb[2], rgb[3], rgb[4], rgb[5], rgb[6], rgb[7]);
     }
@@ -582,12 +582,12 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
                 if (src[i] < rgb_min) rgb_min = src[i];
                 if (src[i] > rgb_max) rgb_max = src[i];
             }
-            xprintf("[DBG-INPUT] type=int8, zp=%d, scale=%d/1e6, total=%d\n",
+            DBG_INFO("[DBG-INPUT] type=int8, zp=%d, scale=%d/1e6, total=%d\n",
                     zp, (int)(in_scale * 1000000), total);
-            xprintf("[DBG-INPUT] resized_img: min=%d max=%d avg=%d, first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+            DBG_INFO("[DBG-INPUT] resized_img: min=%d max=%d avg=%d, first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
                     rgb_min, rgb_max, (int)(rgb_sum / total),
                     src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]);
-            xprintf("[DBG-INPUT] tensor_int8: first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+            DBG_INFO("[DBG-INPUT] tensor_int8: first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
                     dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], dst[6], dst[7]);
         }
     } else {
@@ -599,9 +599,9 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         memcpy(dst, src, total);
 
         if (frame_count <= 3) {
-            xprintf("[DBG-INPUT] type=uint8, zp=%d, scale=%d/1e6\n",
+            DBG_INFO("[DBG-INPUT] type=uint8, zp=%d, scale=%d/1e6\n",
                     fd_input->params.zero_point, (int)(fd_input->params.scale * 1000000));
-            xprintf("[DBG-INPUT] tensor_uint8: first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+            DBG_INFO("[DBG-INPUT] tensor_uint8: first8=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
                     dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], dst[6], dst[7]);
         }
     }
@@ -663,11 +663,12 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
                     if (data[j] > zp) cnt_above_zp++;
                     sum += data[j];
                 }
-                /* Compute max dequantized score (no sigmoid, just clamp) */
-                float max_deq = fmaxf(0.0f, (float)(vmax - zp) * sc);
-                xprintf("[DBG] Score[%d]: zp=%d sc=%d/1e6 range=[%d,%d] avg=%d above_zp=%d/%d deq=%d/1000\n",
+                /* Compute max dequantized logit and sigmoid score */
+                float max_logit = (float)(vmax - zp) * sc;
+                float max_sigmoid = 1.0f / (1.0f + expf(-max_logit));
+                DBG_INFO("[DBG] Score[%d]: zp=%d sc=%d/1e6 range=[%d,%d] avg=%d above_zp=%d/%d logit=%d sig=%d/1000\n",
                         i, zp, (int)(sc * 1000000), (int)vmin, (int)vmax,
-                        (int)(sum / sz), cnt_above_zp, sz, (int)(max_deq * 1000));
+                        (int)(sum / sz), cnt_above_zp, sz, (int)(max_logit * 1000), (int)(max_sigmoid * 1000));
             }
         }
         /* Also dump bbox tensor stats for stride 16 to check if model is doing anything meaningful */
@@ -679,7 +680,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
                 if (data[j] < vmin) vmin = data[j];
                 if (data[j] > vmax) vmax = data[j];
             }
-            xprintf("[DBG] Bbox[1]: zp=%d range=[%d,%d] bytes=%d\n",
+            DBG_INFO("[DBG] Bbox[1]: zp=%d range=[%d,%d] bytes=%d\n",
                     fd_bbox_tensors[1]->params.zero_point, (int)vmin, (int)vmax, sz);
         }
     }
@@ -705,11 +706,21 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     int num_faces = 0;
     std::forward_list<scrfd_face> faces = scrfd_detect(&scrfd_net, img_w, img_h, &num_faces);
 
-    if (num_faces == 0) {
-        /* No face detected - log every 10th frame to avoid spam */
-        if (frame_count % 10 == 0) {
-            xprintf("[FACE] Frame %d: 0 faces (img=%dx%d)\n", frame_count, img_w, img_h);
+    DBG_INFO("[FACE] Frame %d: %d faces detected (img=%dx%d)\n", frame_count, num_faces, img_w, img_h);
+
+    /* Debug: show first face details */
+    if (num_faces > 0) {
+        for (auto& f : faces) {
+            if (f.score > 0) {
+                DBG_INFO("[FACE] best_face: bbox=(%d,%d,%d,%d) score=%d/1000 stride=%d\n",
+                        (int)f.bbox.x, (int)f.bbox.y, (int)f.bbox.w, (int)f.bbox.h,
+                        (int)(f.score * 1000), f.stride_idx);
+                break;
+            }
         }
+    }
+
+    if (num_faces == 0) {
         return 0;
     }
 
@@ -780,10 +791,14 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     /* Get best (highest score) face with valid size */
     scrfd_face *best_face = scrfd_get_best_face(faces, MIN_FACE_SIZE);
     if (best_face == nullptr || best_face->score <= 0) {
-        /* No valid face - response sent by face_invoke.hpp */
+        DBG_INFO("[FACE] best_face=NULL (min_size=%d), faces dropped by size filter\n", MIN_FACE_SIZE);
         scrfd_free_dets(faces);
         return 0;
     }
+    DBG_INFO("[FACE] best_face: bbox=(%d,%d,%d,%d) score=%d\n",
+            (int)best_face->bbox.x, (int)best_face->bbox.y,
+            (int)best_face->bbox.w, (int)best_face->bbox.h,
+            (int)(best_face->score * 1000));
 
     /* Store detection result */
     alg_result->num_tracked_human_targets = 1;
@@ -962,15 +977,9 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         embedding_msg->landmarks[i].y = best_face->landmarks[i].y;
     }
 
-    /* Pack message and calculate CRC */
-    pack_face_embedding_msg(
-        embedding_msg,
-        embedding_msg->embedding,
-        &embedding_msg->bbox,
-        &embedding_msg->pose,
-        embedding_msg->confidence,
-        embedding_msg->timestamp,
-        embedding_msg->face_id);
+    /* NOTE: pack_face_embedding_msg() removed — it was for binary UART protocol
+     * and its internal memset() destroyed bbox/landmarks/quality data that
+     * face_invoke.hpp reads for JSON output. */
     DBG_VERBOSE("  Embedding extracted (%dD), quality=%.2f\n", emb_dim, embedding_msg->quality);
 
     /* JSON output is now handled by face_invoke.hpp event_reply() */

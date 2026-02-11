@@ -22,6 +22,16 @@ extern "C" {
 #include "xprintf.h"
 }
 
+/* Debug output control: set to 0 to disable per-frame debug prints
+ * that can interleave with JSON output on the shared UART. */
+#define SCRFD_DEBUG 0
+
+#if SCRFD_DEBUG
+#define SCRFD_DBG(fmt, ...) xprintf(fmt, ##__VA_ARGS__)
+#else
+#define SCRFD_DBG(fmt, ...) ((void)0)
+#endif
+
 /* Detection stride values for SCRFD_500M */
 static const int STRIDES[SCRFD_NUM_STRIDES] = {8, 16, 32};
 
@@ -36,10 +46,16 @@ static constexpr float SMOOTHING_ALPHA = 0.7f;           /* EMA smoothing factor
 static constexpr float MAX_FACE_RATIO = 0.6f;            /* Max face size as ratio of image dimension */
 
 /**
+ * @brief Sigmoid activation function
+ */
+static inline float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+/**
  * @brief Dequantize INT8 value to float
  *
  * All tensors from Vela NPU are int8 quantized.
- * Matches reference project (tflm_face_embedding/scrfd_postprocessing.cc).
  */
 static inline float dequantize(int8_t value, float scale, int zero_point) {
     return (float)(value - zero_point) * scale;
@@ -181,7 +197,7 @@ scrfd_network scrfd_init(
             branch->kps_zp = 0;
         }
 
-        xprintf("[SCRFD] Stride %d: score(zp=%d,sc=%d/1e6) bbox(zp=%d,sc=%d/1e6) kps(zp=%d,sc=%d/1e6)\n",
+        SCRFD_DBG("[SCRFD] Stride %d: score(zp=%d,sc=%d/1e6) bbox(zp=%d,sc=%d/1e6) kps(zp=%d,sc=%d/1e6)\n",
                 STRIDES[i],
                 branch->score_zp, (int)(branch->score_scale * 1000000),
                 branch->bbox_zp, (int)(branch->bbox_scale * 1000000),
@@ -223,15 +239,15 @@ std::forward_list<scrfd_face> scrfd_detect(
     /* Debug: print mapping info once */
     static int printed_cnt = 0;
     if (printed_cnt < 3) {
-        xprintf("[SCRFD] img=%dx%d input=%dx%d scale=(%d,%d)/1000 pad=(%d,%d)\n",
+        SCRFD_DBG("[SCRFD] img=%dx%d input=%dx%d scale=(%d,%d)/1000 pad=(%d,%d)\n",
                 image_w, image_h, net->input_w, net->input_h,
                 (int)(sc_x * 1000), (int)(sc_y * 1000), p_x, p_y);
-        xprintf("[SCRFD] branches=%d: ", net->num_branches);
+        SCRFD_DBG("[SCRFD] branches=%d: ", net->num_branches);
         for (int i = 0; i < net->num_branches; i++) {
-            xprintf("s%d(%dx%d) ", net->branches[i].stride,
+            SCRFD_DBG("s%d(%dx%d) ", net->branches[i].stride,
                     net->branches[i].grid_w, net->branches[i].grid_h);
         }
-        xprintf("\n");
+        SCRFD_DBG("\n");
         printed_cnt++;
     }
 
@@ -275,16 +291,16 @@ std::forward_list<scrfd_face> scrfd_detect(
                     int row_idx = (h * grid_w + w) * SCRFD_NUM_ANCHORS + a;
 
                     /* Decode face score - score tensor is [N, 1]
-                     * TFLite model outputs probabilities directly (0-1 range),
-                     * NOT logits. Do NOT apply sigmoid!
-                     * Clamp to [0,1] to handle minor quantization overflow.
-                     * (Matches reference: tflm_face_embedding/scrfd_postprocessing.cc) */
-                    float score = dequantize(
+                     * Vela-compiled model outputs LOGITS (pre-sigmoid), not probabilities.
+                     * Score tensor quantization confirms this:
+                     *   stride 8: zp=127, stride 16: zp=77, stride 32: zp=127
+                     * Must apply sigmoid to convert logits to [0,1] probability. */
+                    float score_logit = dequantize(
                         branch->score_data[row_idx],
                         branch->score_scale,
                         branch->score_zp
                     );
-                    score = fminf(1.0f, fmaxf(0.0f, score));
+                    float score = sigmoid(score_logit);
 
                     /* Track max score for debugging */
                     if (score > max_score) {
@@ -379,10 +395,10 @@ std::forward_list<scrfd_face> scrfd_detect(
 
                     /* Debug: print first 2 detections per stride */
                     if (stride_counts[s] < 2) {
-                        xprintf("[DET] s%d: bbox=(%d,%d,%d,%d) score=%d/1000\n",
+                        SCRFD_DBG("[DET] s%d: bbox=(%d,%d,%d,%d) score=%d/1000\n",
                                 stride, (int)det.bbox.x, (int)det.bbox.y,
                                 (int)det.bbox.w, (int)det.bbox.h, (int)(score * 1000));
-                        xprintf("  lm: LE(%d,%d) RE(%d,%d) N(%d,%d) LM(%d,%d) RM(%d,%d)\n",
+                        SCRFD_DBG("  lm: LE(%d,%d) RE(%d,%d) N(%d,%d) LM(%d,%d) RM(%d,%d)\n",
                                 (int)det.landmarks[0].x, (int)det.landmarks[0].y,
                                 (int)det.landmarks[1].x, (int)det.landmarks[1].y,
                                 (int)det.landmarks[2].x, (int)det.landmarks[2].y,
@@ -399,7 +415,7 @@ std::forward_list<scrfd_face> scrfd_detect(
     }
 
     /* Debug: print max score per stride to diagnose detection issues */
-    xprintf("max_score: s8=%d s16=%d s32=%d /1000, best=%d(b%d), thresh=%d\n",
+    SCRFD_DBG("max_score: s8=%d s16=%d s32=%d /1000, best=%d(b%d), thresh=%d\n",
             (int)(max_score_per_stride[0] * 1000),
             (int)(max_score_per_stride[1] * 1000),
             (int)(max_score_per_stride[2] * 1000),
@@ -424,7 +440,7 @@ std::forward_list<scrfd_face> scrfd_detect(
         }
     }
 
-    xprintf("[NMS] After intra-stride: s8=%d s16=%d s32=%d\n",
+    SCRFD_DBG("[NMS] After intra-stride: s8=%d s16=%d s32=%d\n",
             stride_counts[0], stride_counts[1], stride_counts[2]);
 
     /* Step 2: Merge all stride detections */
@@ -451,7 +467,7 @@ std::forward_list<scrfd_face> scrfd_detect(
         }
     }
 
-    xprintf("[NMS] After cross-stride: %d faces\n", *num_faces);
+    SCRFD_DBG("[NMS] After cross-stride: %d faces\n", *num_faces);
 
     /* Step 4: Filter out oversized detections
      * Faces larger than MAX_FACE_RATIO of image dimension are likely false positives */
@@ -461,8 +477,9 @@ std::forward_list<scrfd_face> scrfd_detect(
 
     for (auto& face : dets) {
         if (face.score > 0 && (face.bbox.w > max_face_w || face.bbox.h > max_face_h)) {
-            xprintf("[SCRFD] Suppressed oversized: %.0fx%.0f (max=%.0fx%.0f)\n",
-                    face.bbox.w, face.bbox.h, max_face_w, max_face_h);
+            SCRFD_DBG("[SCRFD] Suppressed oversized: %dx%d (max=%dx%d)\n",
+                    (int)face.bbox.w, (int)face.bbox.h,
+                    (int)max_face_w, (int)max_face_h);
             face.score = 0;
             oversized_count++;
         }
@@ -470,7 +487,7 @@ std::forward_list<scrfd_face> scrfd_detect(
 
     if (oversized_count > 0) {
         *num_faces -= oversized_count;
-        xprintf("[NMS] After size filter: %d faces\n", *num_faces);
+        SCRFD_DBG("[NMS] After size filter: %d faces\n", *num_faces);
     }
 
     return dets;
@@ -625,7 +642,7 @@ bool scrfd_validate_face(
 
     /* Check minimum face size */
     if (face->bbox.w < min_size || face->bbox.h < min_size) {
-        xprintf("[VAL] FAIL: size %dx%d < %d\n", (int)face->bbox.w, (int)face->bbox.h, min_size);
+        SCRFD_DBG("[VAL] FAIL: size %dx%d < %d\n", (int)face->bbox.w, (int)face->bbox.h, min_size);
         return false;
     }
 
@@ -633,7 +650,7 @@ bool scrfd_validate_face(
     if (face->bbox.x < 0 || face->bbox.y < 0 ||
         face->bbox.x + face->bbox.w > img_w ||
         face->bbox.y + face->bbox.h > img_h) {
-        xprintf("[VAL] FAIL: bounds box=[%d,%d,%d,%d] img=%dx%d\n",
+        SCRFD_DBG("[VAL] FAIL: bounds box=[%d,%d,%d,%d] img=%dx%d\n",
                 (int)face->bbox.x, (int)face->bbox.y, (int)face->bbox.w, (int)face->bbox.h, img_w, img_h);
         return false;
     }
@@ -648,7 +665,7 @@ bool scrfd_validate_face(
     for (int i = 0; i < SCRFD_NUM_LANDMARKS; i++) {
         if (face->landmarks[i].x < x_min || face->landmarks[i].x > x_max ||
             face->landmarks[i].y < y_min || face->landmarks[i].y > y_max) {
-            xprintf("[VAL] FAIL: lm[%d]=(%d,%d) outside box+margin [%d-%d, %d-%d]\n",
+            SCRFD_DBG("[VAL] FAIL: lm[%d]=(%d,%d) outside box+margin [%d-%d, %d-%d]\n",
                     i, (int)face->landmarks[i].x, (int)face->landmarks[i].y,
                     (int)x_min, (int)x_max, (int)y_min, (int)y_max);
             return false;
@@ -657,7 +674,7 @@ bool scrfd_validate_face(
 
     /* Check eye positions (left eye should be to the left of right eye) */
     if (face->landmarks[SCRFD_LM_LEFT_EYE].x >= face->landmarks[SCRFD_LM_RIGHT_EYE].x) {
-        xprintf("[VAL] FAIL: eye order L(%d) >= R(%d)\n",
+        SCRFD_DBG("[VAL] FAIL: eye order L(%d) >= R(%d)\n",
                 (int)face->landmarks[SCRFD_LM_LEFT_EYE].x, (int)face->landmarks[SCRFD_LM_RIGHT_EYE].x);
         return false;
     }
@@ -666,7 +683,7 @@ bool scrfd_validate_face(
     float eye_center_y = (face->landmarks[SCRFD_LM_LEFT_EYE].y +
                           face->landmarks[SCRFD_LM_RIGHT_EYE].y) / 2.0f;
     if (face->landmarks[SCRFD_LM_NOSE].y < eye_center_y) {
-        xprintf("[VAL] FAIL: nose_y(%d) < eye_center_y(%d)\n",
+        SCRFD_DBG("[VAL] FAIL: nose_y(%d) < eye_center_y(%d)\n",
                 (int)face->landmarks[SCRFD_LM_NOSE].y, (int)eye_center_y);
         return false;  /* Nose should be below eyes */
     }
