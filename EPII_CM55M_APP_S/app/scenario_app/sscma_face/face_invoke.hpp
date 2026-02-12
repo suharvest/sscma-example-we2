@@ -158,9 +158,11 @@ private:
             ", \"data\": {\"mode\": \"face\", \"count\": ",
             std::to_string(_times));
 
-        /* Add image */
+        /* Include image only for UART caller (face registration app).
+         * SPI caller (ESP32) doesn't need image — avoids RX buffer overflow. */
+        bool include_image = (static_cast<Transport*>(_caller)->type == EL_TRANSPORT_UART);
         response += ", ";
-        response += img_2_json_str(jpeg_ptr);
+        response += img_2_json_str(include_image ? jpeg_ptr : nullptr);
         response += ", ";
         response += concat_strings("\"resolution\": [",
                                    std::to_string(width), ", ",
