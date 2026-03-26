@@ -27,9 +27,9 @@ MAKEFILE_APP_TYPE="tflm_face_embedding"
 
 # Model paths
 SCRFD_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite"
-SCRFD_ADDR="0x200000"
+SCRFD_ADDR="0x400000"
 EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/foamliu_mobilefacenet_128d/foamliu_mobilefacenet_128d_qat_int8_vela.tflite"
-EMBEDDING_ADDR="0x400000"
+EMBEDDING_ADDR="0x510000"
 
 # Serial port (auto-detect)
 SERIAL_PORT=$(ls /dev/tty.usbmodem* 2>/dev/null | head -1)
