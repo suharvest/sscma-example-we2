@@ -210,14 +210,19 @@ private:
         static_cast<Transport*>(_caller)->send_bytes(response.c_str(), response.size());
     }
 
+    /* Run embedding every N frames to reduce latency.
+     * Detection runs every frame, embedding only on EMBED_INTERVAL frames.
+     * This frees the executor for AT commands between heavy frames. */
+    static constexpr int EMBED_INTERVAL = 3;
+
     void event_loop() {
         if ((_n_times >= 0) & (_times++ >= _n_times)) [[unlikely]]
             return;
+
+        /* FIX 1: Check stop token early — allows AT+BREAK to interrupt immediately */
         if (static_resource->current_task_id.load(std::memory_order_seq_cst) != _task_id) [[unlikely]]
             return;
 
-        /* Use sscma_micro's camera to capture a YUV422P frame,
-         * same as the standard YOLO/FOMO invoke path. */
         auto camera = static_resource->device->get_camera();
         el_img_t frame = {};
 
@@ -234,37 +239,58 @@ private:
             return;
         }
 
-        /* CRITICAL: Invalidate D-Cache for DMA-written camera buffer.
-         * Camera DMA writes directly to memory, bypassing CPU cache.
-         * Without invalidation, CPU reads stale cached data. */
         if (frame.data && frame.size > 0) {
             SCB_InvalidateDCache_by_Addr((uint32_t*)frame.data, frame.size);
         }
 
-        /* Get JPEG frame from sscma_micro's DP pipeline BEFORE stop_stream.
-         * Must use camera->get_processed_frame() which reads from the correct
-         * WDMA2 address (SRAM2), not cisdp_get_jpginfo() which reads from
-         * the face mode's unused SRAM0 addresses. */
         el_img_t jpeg_frame = {};
         camera->get_processed_frame(&jpeg_frame);
 
-        /* Run face detection + embedding on the YUV422P frame */
+        /* FIX 2: SCRFD runs every frame (~4ms), MobileFaceNet only every EMBED_INTERVAL frames (~15ms).
+         * Skip frames get fresh bbox from SCRFD but reuse last embedding.
+         * This keeps detection responsive while reducing avg frame time. */
         struct_algoResult algo_result = {};
         face_embedding_msg_t embedding_result = {};
+        bool run_embedding = (_times % EMBED_INTERVAL == 0);
 
-        int ret = cv_face_embedding_run(frame.data, frame.width, frame.height,
-                                         &algo_result, &embedding_result);
+        if (run_embedding) {
+            /* Full pipeline: SCRFD + alignment + MobileFaceNet */
+            int ret = cv_face_embedding_run(frame.data, frame.width, frame.height,
+                                             &algo_result, &embedding_result);
+            if (ret != 0) {
+                EL_LOGW("[FaceInvoke] Face embedding run returned: %d", ret);
+            }
+            /* Cache embedding for skip frames */
+            _last_embedding_result = embedding_result;
+        } else {
+            /* Detection only: fresh bbox, reuse last embedding */
+            cv_face_detect_only(frame.data, frame.width, frame.height, &algo_result);
+            embedding_result = _last_embedding_result;
+            /* Update bbox in embedding result to match fresh detection */
+            if (algo_result.num_tracked_human_targets > 0) {
+                embedding_result.bbox.x = (uint16_t)algo_result.ht[0].upper_body_bbox.x;
+                embedding_result.bbox.y = (uint16_t)algo_result.ht[0].upper_body_bbox.y;
+                embedding_result.bbox.width = (uint16_t)algo_result.ht[0].upper_body_bbox.width;
+                embedding_result.bbox.height = (uint16_t)algo_result.ht[0].upper_body_bbox.height;
+                embedding_result.confidence = algo_result.ht[0].upper_body_score / 100.0f;
+            }
+        }
 
         camera->stop_stream();
 
-        if (ret != 0) {
-            EL_LOGW("[FaceInvoke] Face embedding run returned: %d", ret);
-        }
+        /* FIX 1 (continued): Check again after inference — catch commands that arrived during processing */
+        if (static_resource->current_task_id.load(std::memory_order_seq_cst) != _task_id) [[unlikely]]
+            return;
 
         int width = frame.width;
         int height = frame.height;
 
         event_reply(algo_result, embedding_result, width, height, jpeg_frame);
+
+        /* FIX 3: Yield before scheduling next frame — gives pending AT commands
+         * a chance to execute between inference cycles.
+         * Without this, face loop monopolizes the executor. */
+        static_resource->device->yield();
 
         /* Schedule next iteration */
         static_resource->executor->add_task(
@@ -284,6 +310,9 @@ private:
     std::size_t _task_id;
     int32_t _times;
     el_err_code_t _ret;
+
+    /* Cached embedding for skip frames (FIX 2) */
+    face_embedding_msg_t _last_embedding_result = {};
 };
 
 }  // namespace sscma::callback

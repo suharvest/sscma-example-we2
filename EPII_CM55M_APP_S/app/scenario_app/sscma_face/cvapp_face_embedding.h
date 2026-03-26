@@ -46,6 +46,12 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
                            face_embedding_msg_t *embedding_result);
 
 /**
+ * @brief Run face detection only (skip embedding) for low-latency frames
+ */
+int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t frame_height,
+                         struct_algoResult *alg_result);
+
+/**
  * @brief Deinitialize face embedding
  *
  * @return int 0 on success, -1 on error

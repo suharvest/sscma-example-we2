@@ -1001,6 +1001,106 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     return 0;
 }
 
+int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t frame_height,
+                         struct_algoResult *alg_result)
+{
+    /* Lightweight detection-only path: runs SCRFD (~4ms) without MobileFaceNet (~15ms).
+     * Used for skip frames to keep bbox updated while reducing latency. */
+
+    if (g_face_emb_init == 0) return -1;
+
+    uint32_t img_w = frame_width;
+    uint32_t img_h = frame_height;
+
+    /* STEP 0: Convert YUV422P → RGB for SCRFD */
+    SCB_InvalidateDCache_by_Addr((uint32_t*)frame_data, img_w * img_h * 2);
+
+    el_img_t src_img = {};
+    src_img.data = frame_data;
+    src_img.size = img_w * img_h * 2;
+    src_img.width = (uint16_t)img_w;
+    src_img.height = (uint16_t)img_h;
+    src_img.format = EL_PIXEL_FORMAT_YUV422;
+    src_img.rotate = EL_PIXEL_ROTATE_0;
+
+    el_img_t dst_img = {};
+    dst_img.data = (uint8_t *)fd_resized_img;
+    dst_img.size = FD_INPUT_TENSOR_WIDTH * FD_INPUT_TENSOR_HEIGHT * 3;
+    dst_img.width = FD_INPUT_TENSOR_WIDTH;
+    dst_img.height = FD_INPUT_TENSOR_HEIGHT;
+    dst_img.format = EL_PIXEL_FORMAT_RGB888;
+    dst_img.rotate = EL_PIXEL_ROTATE_0;
+
+    edgelab::el_img_convert(&src_img, &dst_img);
+
+    /* STEP 1: Copy to SCRFD input tensor */
+    float scale_w = (float)img_w / FD_INPUT_TENSOR_WIDTH;
+    float scale_h = (float)img_h / FD_INPUT_TENSOR_HEIGHT;
+
+    if (fd_input->type == kTfLiteInt8) {
+        uint8_t *src = (uint8_t *)fd_resized_img;
+        int8_t *dst = fd_input->data.int8;
+        int8_t zp = (int8_t)fd_input->params.zero_point;
+        for (int i = 0; i < fd_input->bytes; i++) {
+            dst[i] = (int8_t)((int)src[i] + zp);
+        }
+    } else {
+        memcpy(fd_input->data.uint8, (uint8_t *)fd_resized_img,
+               FD_INPUT_TENSOR_WIDTH * FD_INPUT_TENSOR_HEIGHT * FD_INPUT_TENSOR_CHANNEL);
+    }
+
+    /* STEP 2: Run SCRFD */
+    if (fd_input->data.data) {
+        SCB_CleanDCache_by_Addr((uint32_t*)fd_input->data.data, fd_input->bytes);
+    }
+
+    TfLiteStatus invoke_status = fd_int_ptr->Invoke();
+    if (invoke_status != kTfLiteOk) return -1;
+
+    /* Invalidate D-Cache for SCRFD outputs */
+    for (int i = 0; i < SCRFD_NUM_STRIDES; i++) {
+        if (fd_score_tensors[i] && fd_score_tensors[i]->data.data)
+            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_score_tensors[i]->data.data, fd_score_tensors[i]->bytes);
+        if (fd_bbox_tensors[i] && fd_bbox_tensors[i]->data.data)
+            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_bbox_tensors[i]->data.data, fd_bbox_tensors[i]->bytes);
+        if (fd_kps_tensors[i] && fd_kps_tensors[i]->data.data)
+            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_kps_tensors[i]->data.data, fd_kps_tensors[i]->bytes);
+    }
+
+    /* STEP 3: Post-processing */
+    /* Set coordinate mapping: simple resize (no letterbox padding) */
+    scrfd_net.scale_x = scale_w;
+    scrfd_net.scale_y = scale_h;
+    scrfd_net.pad_x = 0;
+    scrfd_net.pad_y = 0;
+
+    int num_faces = 0;
+    auto faces = scrfd_detect(&scrfd_net, (int)img_w, (int)img_h, &num_faces);
+
+    if (num_faces <= 0) {
+        alg_result->num_tracked_human_targets = 0;
+        return 0;
+    }
+
+    scrfd_face *best_face = scrfd_get_best_face(faces, MIN_FACE_SIZE);
+    if (best_face == nullptr || best_face->score <= 0) {
+        scrfd_free_dets(faces);
+        alg_result->num_tracked_human_targets = 0;
+        return 0;
+    }
+
+    /* Fill detection result */
+    alg_result->num_tracked_human_targets = 1;
+    alg_result->ht[0].upper_body_score = (uint32_t)(best_face->score * 100);
+    alg_result->ht[0].upper_body_bbox.x = (uint32_t)best_face->bbox.x;
+    alg_result->ht[0].upper_body_bbox.y = (uint32_t)best_face->bbox.y;
+    alg_result->ht[0].upper_body_bbox.width = (uint32_t)best_face->bbox.w;
+    alg_result->ht[0].upper_body_bbox.height = (uint32_t)best_face->bbox.h;
+
+    scrfd_free_dets(faces);
+    return 0;
+}
+
 int cv_face_embedding_deinit()
 {
     /* No camera cleanup needed — sscma_micro owns the camera pipeline */
