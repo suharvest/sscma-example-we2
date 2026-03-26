@@ -196,23 +196,33 @@ class ESP32ResetController:
 # Himax Flash Functions
 # =============================================================================
 
-def open_himax_serial(port, baudrate=BAUDRATE, timeout=TIMEOUT):
-    """Open serial connection to Himax."""
+def open_himax_serial(port, baudrate=BAUDRATE, timeout=TIMEOUT, retries=5, retry_delay=1.0):
+    """Open serial connection to Himax with retry on Resource busy."""
     global ser
-    ser = serial.Serial()
-    ser.port = port
-    ser.baudrate = baudrate
-    ser.timeout = timeout
-    ser.bytesize = serial.EIGHTBITS
-    ser.stopbits = serial.STOPBITS_ONE
-    ser.xonxoff = 0
-    ser.rtscts = 0
-    ser.parity = serial.PARITY_NONE
-    ser.open()
-    ser.flushInput()
-    ser.flushOutput()
-    print(f"  Himax serial opened ({port} @ {baudrate})")
-    return ser
+    last_error = None
+    for attempt in range(retries):
+        try:
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = baudrate
+            ser.timeout = timeout
+            ser.bytesize = serial.EIGHTBITS
+            ser.stopbits = serial.STOPBITS_ONE
+            ser.xonxoff = 0
+            ser.rtscts = 0
+            ser.parity = serial.PARITY_NONE
+            ser.open()
+            ser.flushInput()
+            ser.flushOutput()
+            print(f"  Himax serial opened ({port} @ {baudrate})")
+            return ser
+        except serial.SerialException as e:
+            last_error = e
+            if attempt < retries - 1:
+                print(f"  Port busy, retrying in {retry_delay}s... ({attempt + 1}/{retries})")
+                time.sleep(retry_delay)
+            else:
+                raise last_error
 
 
 def send_at_command(command):
