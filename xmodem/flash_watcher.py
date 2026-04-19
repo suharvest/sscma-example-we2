@@ -49,7 +49,7 @@ DEFAULT_MODELS_DIR = PROJECT_ROOT / "model_zoo/tflm_face_embedding"
 
 # Model files - use model_zoo reference models
 DEFAULT_SCRFD_MODEL = DEFAULT_MODELS_DIR / "scrfd/models/scrfd_500m_kps_int8_vela.tflite"
-DEFAULT_FACENET_MODEL = DEFAULT_MODELS_DIR / "ghostfacenet/models/ghostfacenet_0.5_112_int8_vela.tflite"
+DEFAULT_FACENET_MODEL = DEFAULT_MODELS_DIR / "foamliu_mobilefacenet_128d/foamliu_mobilefacenet_128d_qat_int8_vela.tflite"
 DEFAULT_YOLO_MODEL = PROJECT_ROOT / "model_zoo/sscma/swift_yolo_nano_person_192_int8_vela.tflite"
 
 # Flash addresses for models (must match common_config.h)
@@ -599,7 +599,7 @@ Flash addresses:
     models = []
     if args.models:
         models.append(("SCRFD", str(DEFAULT_SCRFD_MODEL), MODEL_ADDRESSES["scrfd"]))
-        models.append(("GhostFaceNet", str(DEFAULT_FACENET_MODEL), MODEL_ADDRESSES["facenet"]))
+        models.append(("MobileFaceNet", str(DEFAULT_FACENET_MODEL), MODEL_ADDRESSES["facenet"]))
 
     if args.model_scrfd:
         models.append(("SCRFD", args.model_scrfd, MODEL_ADDRESSES["scrfd"]))
