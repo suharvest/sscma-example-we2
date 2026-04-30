@@ -62,8 +62,16 @@ we2_image_gen_local/Images.txt
 
 # Project specific
 model_zoo/tflm_face_recognition/calibration_data/
+model_zoo/tflm_face_embedding/datasets/
+model_zoo/tflm_face_embedding/qat_tflite_output/
+model_zoo/tflm_face_embedding/scrfd/quantization/qat_tflite_output/
 *.bin
 *.pb
+*.pth
+*.onnx
 .venv/
 debug_output/
 *.jpg
+__pycache__/
+*_vela.tflite
+*_summary_*.csv
