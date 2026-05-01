@@ -10,7 +10,8 @@ import argparse
 # Import from main script
 from qat_scrfd_enhanced import (
     SCRFD, load_pretrained_weights, fuse_model,
-    export_to_onnx, convert_to_tflite, sample_ms1m_images
+    export_to_onnx, convert_to_tflite, sample_ms1m_images,
+    load_flat_images, QAT_DATA_DIR, INPUT_SIZE
 )
 
 def main():
@@ -55,8 +56,11 @@ def main():
     output_onnx = f"{args.output}.onnx"
     export_to_onnx(model, output_onnx, 160)
 
-    # Load calibration data
+    # Load calibration data (try MS1M first, then flat qat_160 directory)
     calib_data, _ = sample_ms1m_images("./datasets/ms1m-arcface", 160, 1000)
+    if calib_data is None or len(calib_data) < 100:
+        print("MS1M not available, loading from qat_160...")
+        calib_data = load_flat_images(QAT_DATA_DIR, INPUT_SIZE, 1000)
     print(f"Calibration data: {calib_data.shape}, range [{calib_data.min():.2f}, {calib_data.max():.2f}]")
 
     # Convert to TFLite

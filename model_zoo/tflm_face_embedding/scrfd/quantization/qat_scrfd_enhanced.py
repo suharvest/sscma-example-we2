@@ -69,6 +69,7 @@ PTH_FILE = str(SCRIPT_DIR / "scrfd_500m_kps.pth")
 ONNX_REF = str(SCRIPT_DIR / "scrfd_500m_kps.onnx")
 MS1M_DIR = "./datasets/ms1m-arcface"
 LFW_DIR = str(SCRIPT_DIR / "calibration_data/lfw/lfw-deepfunneled")
+QAT_DATA_DIR = str(SCRIPT_DIR / "../../calibration_data/qat_160")
 INPUT_SIZE = 160
 
 
@@ -386,6 +387,41 @@ def sample_ms1m_images(
 
     print(f"  Loaded {len(images)} images")
     return np.array(images), paths
+
+
+def load_flat_images(data_dir: str, input_size: int, max_images: int = 20000) -> Optional[np.ndarray]:
+    """Load images from a flat directory of JPGs (e.g., qat_160/)."""
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        print(f"Data directory not found: {data_dir}")
+        return None
+
+    all_images = sorted(data_path.glob("*.jpg"))
+    print(f"Found {len(all_images)} images in {data_dir}")
+
+    if len(all_images) == 0:
+        return None
+
+    if len(all_images) > max_images:
+        step = len(all_images) // max_images
+        all_images = all_images[::step][:max_images]
+
+    print(f"Loading {len(all_images)} images...")
+    images = []
+    for i, img_path in enumerate(all_images):
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        if img.shape[:2] != (input_size, input_size):
+            img = cv2.resize(img, (input_size, input_size))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = (img.astype(np.float32) - 127.5) / 128.0
+        images.append(img)
+        if (i + 1) % 5000 == 0:
+            print(f"    Progress: {i+1}/{len(all_images)}")
+
+    print(f"  Loaded {len(images)} images")
+    return np.array(images) if images else None
 
 
 def load_lfw_images(lfw_dir: str, input_size: int, max_images: int = 2000) -> np.ndarray:
@@ -813,6 +849,7 @@ def main():
     parser.add_argument('--onnx-ref', default=ONNX_REF, help='ONNX reference for distillation')
     parser.add_argument('--output', default='scrfd_qat_enhanced.tflite', help='Output TFLite path')
     parser.add_argument('--ms1m-dir', default=MS1M_DIR, help='MS1M-ArcFace dataset path')
+    parser.add_argument('--data-dir', default=QAT_DATA_DIR, help='Flat image directory (fallback)')
 
     # Training parameters
     parser.add_argument('--num-images', type=int, default=20000,
@@ -866,6 +903,10 @@ def main():
 
     if train_data is None or len(train_data) < 100:
         print("\nNot enough training images from MS1M!")
+        print("Trying flat image directory (qat_160)...")
+        train_data = load_flat_images(args.data_dir, INPUT_SIZE, args.num_images)
+
+    if train_data is None or len(train_data) < 100:
         print("Falling back to LFW...")
         train_data = load_lfw_images(LFW_DIR, INPUT_SIZE, args.num_images)
         if train_data is None:
