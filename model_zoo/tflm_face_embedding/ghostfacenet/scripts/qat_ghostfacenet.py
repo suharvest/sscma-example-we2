@@ -107,8 +107,16 @@ def load_teacher_model(h5_path: str) -> tf.keras.Model:
 
     clean_config(config)
 
-    new_model = tf.keras.Model.from_config(config)
-    new_model.set_weights([w.astype(np.float32) for w in model.get_weights()])
+    base_model = tf.keras.Model.from_config(config)
+    base_model.set_weights([w.astype(np.float32) for w in model.get_weights()])
+
+    # Project 512-dim embeddings down to 128-dim via Dense + tanh.
+    # This reduces embedding size by 4x for embedded deployment while
+    # constraining output to [-1, 1] for INT8 quantization.
+    x = base_model.output  # [batch, 512]
+    x = tf.keras.layers.Dense(128, name='embedding_projection')(x)
+    x = tf.keras.layers.Activation('tanh', name='tanh_constraint')(x)
+    new_model = tf.keras.Model(inputs=base_model.input, outputs=x)
 
     print(f"  Input shape: {new_model.input_shape}")
     print(f"  Output shape: {new_model.output_shape}")
@@ -410,8 +418,9 @@ def train_qat(
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     # Learning rate schedule: warmup + cosine decay
-    initial_lr = 5e-5      # Starting LR (during warmup)
-    peak_lr = 2e-4         # Peak LR after warmup
+    # With tanh + gradient clipping, can use moderate LR
+    initial_lr = 3e-5      # Starting LR (during warmup)
+    peak_lr = 1e-4         # Peak LR after warmup (gradient clipping prevents NaN)
     final_lr = 1e-6        # Final LR
 
     # Use legacy optimizer for M1/M2 Mac compatibility
@@ -473,6 +482,7 @@ def train_qat(
             loss = cosine_loss + emb_penalty_weight * embedding_penalty
 
         gradients = tape.gradient(loss, qat_model.trainable_variables)
+        gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
         optimizer.apply_gradients(zip(gradients, qat_model.trainable_variables))
         return loss, tf.reduce_mean(cosine_sim), embedding_penalty
 
@@ -493,6 +503,7 @@ def train_qat(
             loss = cosine_loss
 
         gradients = tape.gradient(loss, qat_model.trainable_variables)
+        gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
         optimizer.apply_gradients(zip(gradients, qat_model.trainable_variables))
         return loss, tf.reduce_mean(cosine_sim), tf.constant(0.0)
 
