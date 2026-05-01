@@ -12,8 +12,8 @@ import sys
 import time
 import os
 
-ESP32_PORT = "/dev/cu.wchusbserial5AF91659653"
-HIMAX_PORT = "/dev/cu.usbmodem5AF91659651"
+ESP32_PORT = "/dev/cu.wchusbserial58370593761"
+HIMAX_PORT = "/dev/cu.usbmodem58370593761"
 FIRMWARE = "we2_image_gen_local/output_case1_sec_wlcsp/output.img"
 
 def hold_esp32_reset(port):
