@@ -114,10 +114,11 @@ namespace {
  * Strategy: SEPARATE tensor arenas for each model, allocated as STATIC buffers
  * to avoid conflicts with sscma_micro's BSS memory region.
  *
- * Memory usage (Vela 3.9.0):
+ * Memory usage (Vela 5.0.0, shared arena):
  *   SCRFD arena:        220 KB (Vela: 201 KB)
- *   MobileFaceNet arena: 700 KB (Vela: 600 KB)
- *   Total:              920 KB
+ *   QAT MobileFaceNet arena: 1300 KB (Vela: 1176 KB)
+ *   Shared arena (models run sequentially): 1300 KB max
+ *   EL_ALLOC extended: 1712 KB (watcher.ld)
  */
 constexpr int scrfd_arena_size = SCRFD_ARENA_SIZE;
 constexpr int mobilefacenet_arena_size = MOBILEFACENET_ARENA_SIZE;
@@ -218,22 +219,25 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * This is safe because face mode doesn't use sscma_micro's standard model.
      */
     el_aligned_malloc_reset();
-    void* arena1 = el_aligned_malloc_once(32, scrfd_arena_size);
-    void* arena2 = el_aligned_malloc_once(32, mobilefacenet_arena_size + mobilefacenet_arena_head_offset);
+    /* Shared arena: models run sequentially, share the same memory (like tflm_fd_fm) */
+    int shared_arena_size = (scrfd_arena_size > mobilefacenet_arena_size + mobilefacenet_arena_head_offset)
+                            ? scrfd_arena_size
+                            : mobilefacenet_arena_size + mobilefacenet_arena_head_offset;
+    void* shared_arena = el_aligned_malloc_once(32, shared_arena_size);
     void* buf1 = el_aligned_malloc_once(32, fd_resize_image_size);
     void* buf2 = el_aligned_malloc_once(32, aligned_face_buffer_size);
     void* buf3 = el_aligned_malloc_once(32, rgb_frame_buffer_size);
 
-    if (!arena1 || !arena2 || !buf1 || !buf2 || !buf3) {
+    if (!shared_arena || !buf1 || !buf2 || !buf3) {
         xprintf("ERROR: Face buffer allocation failed!\n");
-        xprintf("  Need: SCRFD=%d, MFN=%d, resize=%d, align=%d, rgb=%d\n",
-                scrfd_arena_size, mobilefacenet_arena_size, fd_resize_image_size,
+        xprintf("  Need: shared=%d, resize=%d, align=%d, rgb=%d\n",
+                shared_arena_size, fd_resize_image_size,
                 aligned_face_buffer_size, rgb_frame_buffer_size);
         return -30;
     }
 
-    scrfd_tensor_arena = (uint32_t)arena1;
-    mobilefacenet_tensor_arena = (uint32_t)((uint8_t*)arena2 + mobilefacenet_arena_head_offset);
+    scrfd_tensor_arena = (uint32_t)shared_arena;
+    mobilefacenet_tensor_arena = (uint32_t)((uint8_t*)shared_arena + mobilefacenet_arena_head_offset);
     fd_resized_img = (uint32_t)buf1;
     aligned_face_img = (uint32_t)buf2;
     rgb_frame_buffer = (uint32_t)buf3;
@@ -845,12 +849,16 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         (uint8_t *)aligned_face_img,
         &align_transform);
 
-    /* Copy to embedding input tensor - handle INT8 vs UINT8 */
+    /* Copy to embedding input tensor - QAT model (zp=-1, scale=1/127.5):
+     * q = round(pixel - 128.5) => pixel - 129 with int8 clamp */
     if (emb_input->type == kTfLiteInt8) {
         uint8_t *src = (uint8_t *)aligned_face_img;
         int8_t *dst = emb_input->data.int8;
         for (int i = 0; i < aligned_face_buffer_size; i++) {
-            dst[i] = (int8_t)((int)src[i] - 128);
+            int val = src[i] > 128 ? (int)src[i] - 128 : (int)src[i] - 129;
+            if (val < -128) val = -128;
+            if (val > 127) val = 127;
+            dst[i] = (int8_t)val;
         }
         DBG_VERBOSE("  Embedding input ready (INT8, aligned)\n");
     } else {
@@ -882,12 +890,16 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         edgelab::el_img_convert(&src_img, &dst_img);
     }
 
-    /* Copy to embedding input tensor - handle INT8 vs UINT8 */
+    /* Copy to embedding input tensor - QAT model (zp=-1, scale=1/127.5):
+     * q = round(pixel - 128.5) => pixel - 129 with int8 clamp */
     if (emb_input->type == kTfLiteInt8) {
         uint8_t *src = (uint8_t *)aligned_face_img;
         int8_t *dst = emb_input->data.int8;
         for (int i = 0; i < aligned_face_buffer_size; i++) {
-            dst[i] = (int8_t)((int)src[i] - 128);
+            int val = src[i] > 128 ? (int)src[i] - 128 : (int)src[i] - 129;
+            if (val < -128) val = -128;
+            if (val > 127) val = 127;
+            dst[i] = (int8_t)val;
         }
         DBG_VERBOSE("  Embedding input ready (INT8)\n");
     } else {

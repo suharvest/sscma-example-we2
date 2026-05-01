@@ -5,7 +5,7 @@
  *
  * Models:
  *   - SCRFD_500M_KPS: Face detection with 5-point landmarks
- *   - MobileFaceNet: Lightweight face embedding (128D output)
+ *   - MobileFaceNet: QAT InsightFace w600k_mbf (128D output, ArcFace)
  *
  *  Created on: Dec 11, 2025
  *      Author: Face Embedding App
@@ -69,7 +69,7 @@
 #define EMBEDDING_INPUT_WIDTH           112
 #define EMBEDDING_INPUT_HEIGHT          112
 #define EMBEDDING_INPUT_CHANNEL         3
-#define EMBEDDING_OUTPUT_DIM            128     /* MobileFaceNet outputs 128D embeddings */
+#define EMBEDDING_OUTPUT_DIM            128     /* QAT InsightFace w600k_mbf 128D embeddings */
 
 /*
  * Memory Configuration
@@ -84,7 +84,7 @@
  * Note: TFLite Micro runtime needs ~10-20% overhead beyond Vela report.
  */
 #define SCRFD_ARENA_SIZE                (220 * 1024)    /* 220 KB for face detection (Vela: 201 KB) */
-#define MOBILEFACENET_ARENA_SIZE        (700 * 1024)    /* 700 KB for face embedding (Vela: 600 KB) */
+#define MOBILEFACENET_ARENA_SIZE        (1300 * 1024)    /* 1300 KB for QAT MobileFaceNet (Vela: 1176 KB) */
 
 /* Legacy define for total reference */
 #define TENSOR_ARENA_SIZE               (SCRFD_ARENA_SIZE + MOBILEFACENET_ARENA_SIZE)
