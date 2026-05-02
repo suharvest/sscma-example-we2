@@ -9,8 +9,8 @@ MEMORY
     // CM55S_S_EL_HWENC (rw)  : ORIGIN = 0x36000000, LENGTH = 0x36060000 - 0x36000000
 }
 
-__HEAP_SIZE  = 0x4000;  // 16 KB
-__STACK_SIZE = 0x2000;  // 16 KB
+__HEAP_SIZE  = 0x1000;  // 4 KB (reduced to fit QAT model BSS)
+__STACK_SIZE = 0x1000;  // 4 KB
 
 ENTRY(Reset_Handler)
 
@@ -86,20 +86,20 @@ SECTIONS
         . = ALIGN(8);
         *lib_spi_eeprom.*:*(.text* .rodata*)
 
-        . = ALIGN(8);
-        *lib_spi_psram.*:*(.text* .rodata*)
+        // . = ALIGN(8);
+        // *lib_spi_psram.*:*(.text* .rodata*)
 
         . = ALIGN(8);
         *lib_spi_ptl.*:*(.text* .rodata*)
 
-        . = ALIGN(8);
-        *libaudio.*:*(.text* .rodata*)
+        // . = ALIGN(8);
+        // *libaudio.*:*(.text* .rodata*)
 
         . = ALIGN(8);
-        *libsscma_micro.*:*(.text* .rodata*)
-        
-        // . = ALIGN(8);
-        // *libtflmtag2412_u55tag2411_cmsisnn_gnu.*:*(.text* .rodata*)
+        *libsscma_micro.*:*(.text*)
+
+        . = ALIGN(8);
+        *libtflmtag2412_u55tag2411_cmsisnn_gnu.*:*(.text*)
 
     } > CM55M_S_APP_DATA
 
@@ -160,6 +160,15 @@ SECTIONS
 
     } > CM55M_S_APP_ROM
 
+    .lib_rodata :
+    {
+        . = ALIGN(4);
+        *libtflmtag2412_u55tag2411_cmsisnn_gnu.*:*(.rodata*)
+        *libsscma_micro.*:*(.rodata*)
+        *libaudio.*:*(.rodata*)
+        *lib_spi_psram.*:*(.rodata*)
+    } > CM55M_S_APP_ROM
+
     .rodata :
     {
         FILL(0x0000)
@@ -170,7 +179,7 @@ SECTIONS
 
         __rodata_end = .;
 
-    } > CM55M_S_APP_DATA
+    } > CM55M_S_APP_ROM
 
     .persistent :
     {
