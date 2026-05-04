@@ -209,6 +209,9 @@ def fine_tune(
     positive_weight,
     negative_weight,
     negative_margin,
+    threshold_weight,
+    threshold,
+    threshold_margin,
 ):
     x = (images.astype(np.float32) / 127.5) - 1.0
     pair_ds = tf.data.Dataset.from_tensor_slices(pairs)
@@ -247,35 +250,47 @@ def fine_tune(
                 tf.reduce_sum(tf.square(tf.nn.relu(sim - negative_margin)) * neg_mask)
                 / (tf.reduce_sum(neg_mask) + 1e-6)
             )
+            pos_threshold = threshold + threshold_margin
+            neg_threshold = threshold - threshold_margin
+            threshold_loss = (
+                tf.reduce_sum(tf.square(tf.nn.relu(pos_threshold - sim)) * pos_mask)
+                / (tf.reduce_sum(pos_mask) + 1e-6)
+                + tf.reduce_sum(tf.square(tf.nn.relu(sim - neg_threshold)) * neg_mask)
+                / (tf.reduce_sum(neg_mask) + 1e-6)
+            )
             loss = (
                 distill_weight * distill_loss
                 + positive_weight * pos_loss
                 + negative_weight * neg_loss
+                + threshold_weight * threshold_loss
             )
 
         grads = tape.gradient(loss, model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
         opt.apply_gradients(zip(grads, model.trainable_variables))
-        return loss, distill_loss, pos_loss, neg_loss
+        return loss, distill_loss, pos_loss, neg_loss, threshold_loss
 
     for epoch in range(1, epochs + 1):
         losses = []
         distill_losses = []
         pos_losses = []
         neg_losses = []
+        threshold_losses = []
         for batch_pairs in pair_ds:
-            loss, distill_loss, pos_loss, neg_loss = step(batch_pairs)
+            loss, distill_loss, pos_loss, neg_loss, threshold_loss = step(batch_pairs)
             losses.append(float(loss))
             distill_losses.append(float(distill_loss))
             pos_losses.append(float(pos_loss))
             neg_losses.append(float(neg_loss))
+            threshold_losses.append(float(threshold_loss))
 
         print(
             f"epoch {epoch:03d}/{epochs} "
             f"loss={np.mean(losses):.5f} "
             f"distill={np.mean(distill_losses):.5f} "
             f"pos={np.mean(pos_losses):.5f} "
-            f"neg={np.mean(neg_losses):.5f}",
+            f"neg={np.mean(neg_losses):.5f} "
+            f"thr={np.mean(threshold_losses):.5f}",
             flush=True,
         )
         if checkpoint_every > 0 and epoch % checkpoint_every == 0:
@@ -300,6 +315,9 @@ def main():
     parser.add_argument("--positive-weight", type=float, default=2.0)
     parser.add_argument("--negative-weight", type=float, default=8.0)
     parser.add_argument("--negative-margin", type=float, default=0.05)
+    parser.add_argument("--threshold-weight", type=float, default=0.0)
+    parser.add_argument("--threshold", type=float, default=0.02)
+    parser.add_argument("--threshold-margin", type=float, default=0.04)
     parser.add_argument("--cfp-splits", default="", help="Optional CFP-FP train splits, e.g. 2-10. Split 01 is reserved for evaluation.")
     parser.add_argument("--cfp-max-pairs-per-split", type=int, default=0)
     args = parser.parse_args()
@@ -341,6 +359,9 @@ def main():
         args.positive_weight,
         args.negative_weight,
         args.negative_margin,
+        args.threshold_weight,
+        args.threshold,
+        args.threshold_margin,
     )
     model.save_weights(weights_path)
     print(f"Saved weights: {weights_path}")

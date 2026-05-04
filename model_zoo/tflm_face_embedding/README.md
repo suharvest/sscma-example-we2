@@ -106,6 +106,7 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `run_s2_w1_pairft_score_sweep_remote.sh` | WSL2 remote sweep that continues from the balanced checkpoint and tries higher-distillation settings against the balanced single-threshold metric. |
 | `run_s2_w1_pairft_cfp_score_remote.sh` | WSL2 remote sweep that adds CFP-FP splits 02-10 as training pairs while leaving split 01 for evaluation. Use this only as a controlled cross-pose experiment. |
 | `run_s2_w1_pairft_cfp_fallback_remote.sh` | WSL2 remote sweep after enabling cropped-face fallback. Trains with CFP-FP splits 02-10 and reuses the generated fallback aligned/teacher caches. |
+| `run_s2_w1_pairft_threshold_remote.sh` | WSL2 remote sweep that continues from `cfp_fb_b` and adds threshold-aware hinge loss around the deployment threshold. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -162,6 +163,12 @@ Profile fallback S2 result:
 - `official_mobilefacenet/student_distill_w1_pairft_cfp_fb_b/mfn_w1_pairft_128d.int8.tflite`: trained from `balanced` with fallback-aligned LFW + CFP-FP splits 02-10, `distill=0.8`, `positive=1.0`, `negative=12.0`, `margin=0.03`. Full evaluation: LFW `sep=0.2621 acc=81.7%`; CFP-FP `sep=0.0973 acc=73.3%`; single-threshold score `0.700`, threshold `0.0138`, LFW@Thr `69.4%`, CFP@Thr `71.7%`, gap `2.2%`.
 - Vela for `cfp_fb_b`: `599.83 KiB` SRAM, `1056.80 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Conclusion: `cfp_fb_b` is the best current 128D/SRAM candidate under the complete CFP-FP fallback evaluation. It is slightly below w600k score but much more balanced across LFW/CFP and remains well under 1 MiB SRAM.
+
+Threshold-aware S2 result:
+- `train_mfn_student_pair_finetune.py` supports `--threshold-weight`, `--threshold`, and `--threshold-margin`. This adds a hinge loss that pushes positive pairs above `threshold + margin` and negative pairs below `threshold - margin`.
+- `official_mobilefacenet/student_distill_w1_pairft_thr_a/mfn_w1_pairft_128d.int8.tflite`: continued from `cfp_fb_b` for 6 epochs with fallback-aligned LFW + CFP-FP splits 02-10, `threshold_weight=0.5`, `threshold=0.02`, `threshold_margin=0.04`, `distill=0.8`, `positive=1.0`, `negative=12.0`, `margin=0.03`. Full evaluation: LFW `sep=0.2821 acc=83.3%`; CFP-FP `sep=0.0965 acc=72.8%`; single-threshold score `0.714`, threshold `0.0463`, LFW@Thr `71.1%`, CFP@Thr `72.2%`, gap `1.1%`.
+- Vela for `thr_a`: `599.83 KiB` SRAM, `1056.88 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Current ranking under complete fallback evaluation: `thr_a` score `0.714`; w600k score `0.705`; `cfp_fb_b` score `0.700`. `thr_a` is the best current 128D candidate.
 
 ## SCRFD QAT Training
 
