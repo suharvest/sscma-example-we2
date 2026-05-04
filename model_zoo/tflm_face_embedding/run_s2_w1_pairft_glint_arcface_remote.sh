@@ -3,9 +3,13 @@ set -euo pipefail
 
 cd /home/harve/gv2_face_train/tflm_face_embedding
 
-DATASET_DIR="datasets/glint360k_subset_112"
+export HTTP_PROXY="http://127.0.0.1:7890"
+export HTTPS_PROXY="http://127.0.0.1:7890"
+export ALL_PROXY="socks5://127.0.0.1:7890"
+
+DATASET_DIR="datasets/glint360k_balanced_200k_min4_112"
 INIT_WEIGHTS="official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.weights.h5"
-OUT_DIR="official_mobilefacenet/student_distill_w1_pairft_glint_arc_stream_a"
+OUT_DIR="official_mobilefacenet/student_distill_w1_pairft_glint_arc_bal200k_a"
 LOG_DIR="logs"
 mkdir -p "${LOG_DIR}"
 
@@ -19,13 +23,15 @@ current_images() {
 
 {
     date
-    if [[ "$(current_images)" -lt 50000 ]]; then
+    if [[ "$(current_images)" -lt 200000 ]]; then
         /home/harve/.local/bin/uv run python -u download_glint360k_subset.py \
             --output-dir "${DATASET_DIR}" \
             --start-shard 0 \
-            --num-shards 8 \
-            --max-images 50000 \
-            --max-images-per-id 20
+            --num-shards 64 \
+            --max-images 200000 \
+            --max-images-per-id 16 \
+            --min-images-per-id 4 \
+            --balanced-two-pass
     fi
     date
     echo "dataset_images=$(current_images)"
@@ -51,13 +57,13 @@ current_images() {
         --arcface-scale 32.0 \
         --arcface-margin 0.25 \
         --arcface-min-images 2 \
-        --arcface-steps-per-epoch 300 \
+        --arcface-steps-per-epoch 500 \
         --identity-dirs "${DATASET_DIR}" \
-        --max-identity-images 50000 \
+        --max-identity-images 200000 \
         --cfp-splits 2-10 \
         --cfp-max-pairs-per-split 80 \
         --num-calib 500
     date
-} > "${LOG_DIR}/s2_w1_pairft_glint_arc_stream_a.log" 2>&1 &
+} > "${LOG_DIR}/s2_w1_pairft_glint_arc_bal200k_a.log" 2>&1 &
 
 echo $!

@@ -6,8 +6,8 @@ Face detection (SCRFD) + Face embedding (GhostFaceNet/MobileFaceNet) for Ethos-U
 
 | Model | File | Size | Flash Address |
 |-------|------|------|---------------|
-| SCRFD-500M-KPS | `scrfd/models/scrfd_500m_kps_int8_vela.tflite` | 701 KB | 0x200000 |
-| GhostFaceNet-0.5 | `ghostfacenet/models/ghostfacenet_fixed_int8_vela.tflite` | 849 KB | 0x400000 |
+| SCRFD-500M-KPS | `scrfd/models/scrfd_500m_kps_int8_vela.tflite` | 701 KB | 0x400000 |
+| GhostFaceNet-0.5 | `ghostfacenet/models/ghostfacenet_fixed_int8_vela.tflite` | 849 KB | 0x510000 |
 
 ## Model Specifications
 
@@ -29,7 +29,7 @@ Face detection (SCRFD) + Face embedding (GhostFaceNet/MobileFaceNet) for Ethos-U
 tflm_face_embedding/
 ├── scrfd/                           # SCRFD Face Detection
 │   ├── models/                      # Model files
-│   │   ├── scrfd_500m_kps_int8_vela.tflite  # Final model (flash to 0x200000)
+│   │   ├── scrfd_500m_kps_int8_vela.tflite  # Final model (flash to 0x400000)
 │   │   ├── scrfd_500m_kps_int8.tflite       # INT8 quantized
 │   │   ├── scrfd_500m_kps.onnx              # Original ONNX
 │   │   └── scrfd_500m_kps.pth               # PyTorch weights
@@ -46,7 +46,7 @@ tflm_face_embedding/
 │
 ├── ghostfacenet/                    # GhostFaceNet Face Embedding
 │   ├── models/                      # Model files
-│   │   ├── ghostfacenet_fixed_int8_vela.tflite  # Final model (flash to 0x400000)
+│   │   ├── ghostfacenet_fixed_int8_vela.tflite  # Final model (flash to 0x510000)
 │   │   ├── ghostfacenet_fixed_int8.tflite       # INT8 quantized
 │   │   ├── ghostfacenet_float32.onnx            # Float ONNX
 │   │   └── GN_W0.5_S2_ArcFace_epoch16.h5        # Original H5
@@ -197,13 +197,16 @@ Glint360K subset experiment:
 - The first 50k-image training attempt generated a `2.0 GiB` aligned cache and `108 MiB` teacher cache, then exited around GPU initialization. This is now fixed: `train_mfn_student_pair_finetune.py` keeps only pair-loss images in the aligned/teacher caches and streams external identity images from file paths for ArcFace-only steps.
 - `official_mobilefacenet/student_distill_w1_pairft_glint_arc_c/mfn_w1_pairft_128d.int8.tflite`: trained from `tpair_hn_a` with `10000` Glint images, plus LFW + CFP-FP train splits 02-10. It used `15103` total images, `1562` ArcFace classes, and `4710/15103` images eligible for ArcFace (`min_images=2`). Training loss decreased from `3.81251` to `2.61406`; identity ArcFace loss decreased from `18.83940` to `16.91416`.
 - `official_mobilefacenet/student_distill_w1_pairft_glint_arc_stream_a/mfn_w1_pairft_128d.int8.tflite`: 50k streaming run from `tpair_hn_a`. It uses `5103` cached pair images, `50000` streaming Glint identity paths, `8498` ArcFace classes, and `17878/50000` Glint images eligible for streaming ArcFace (`min_images=2`). This run validates that 50k identity data no longer enters the large `x_tf` image constant. Training loss decreased from `3.70730` to `2.36125`; identity ArcFace loss decreased from `20.53532` to `17.39129`.
+- `official_mobilefacenet/student_distill_w1_pairft_glint_arc_bal200k_a/mfn_w1_pairft_128d.int8.tflite`: balanced 200k attempt using `64` Glint shards, `min_images_per_id=4`, `max_images_per_id=16`, and the same streaming ArcFace path. The download script now supports `--balanced-two-pass` to scan identities before extraction; WSL2 needed `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:7890` after starting Clash on Windows. Training/export completed in `729s`.
 - Evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite --model glint_arc_c=official_mobilefacenet/student_distill_w1_pairft_glint_arc_c/mfn_w1_pairft_128d.int8.tflite`.
 - `glint_arc_c` local metrics: LFW `sep=0.2215 acc=77.2%`; CFP-FP `sep=0.0719 acc=70.6%`; single-threshold score `0.712` versus `tpair_hn_a` score `0.725`.
 - `glint_arc_stream_a` local metrics: LFW `sep=0.2259 acc=79.4%`; CFP-FP `sep=0.0876 acc=72.8%`; single-threshold score `0.705`. Low-FAR versus `tpair_hn_a`: LFW TAR@FAR1 improved `29.2% -> 51.7%`, LFW TAR@FAR5 improved `52.5% -> 55.0%`; CFP-FP TAR@FAR5 is roughly unchanged at `12.5% -> 13.3%`.
+- `glint_arc_bal200k_a` local metrics: LFW `sep=0.2064 acc=80.6%`; CFP-FP `sep=0.0734 acc=72.2%`; single-threshold score `0.699`. Low-FAR versus `tpair_hn_a`: LFW TAR@FAR1 improved `29.2% -> 35.8%`, but LFW TAR@FAR5 regressed `52.5% -> 45.8%`; CFP-FP TAR@FAR5 stayed `12.5%`.
 - Low-FAR changes versus `tpair_hn_a`: LFW TAR@FAR5 improved `52.5% -> 57.5%`, LFW TAR@FAR1 improved `29.2% -> 44.2%`; CFP-FP TAR@FAR5 improved `12.5% -> 17.5%`, CFP-FP TAR@FAR1 improved `3.3% -> 4.2%`.
 - Vela for `glint_arc_c`: `599.84 KiB` SRAM, `1055.95 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Vela for `glint_arc_stream_a`: `599.84 KiB` SRAM, `1055.91 KiB` flash, `CPU ops=0`, `NPU=100%`.
-- Conclusion: neither Glint ArcFace run replaces `tpair_hn_a` for the balanced shared-threshold experience yet. The 50k streaming run is useful because it fixes the memory blocker and improves some low-FAR/LFW indicators, but its shared threshold shifts too low and increases FAR. Continue from this code path by tuning ArcFace weight/steps and adding an explicit FAR penalty, not by reverting to larger in-memory caches.
+- Vela for `glint_arc_bal200k_a`: `599.84 KiB` SRAM, `1056.23 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Conclusion: neither Glint ArcFace run replaces `tpair_hn_a` for the balanced shared-threshold experience yet. The 50k streaming run is useful because it fixes the memory blocker and improves some low-FAR/LFW indicators, but its shared threshold shifts too low and increases FAR. The balanced 200k run confirms that simply adding more ArcFace identity data can push the distribution in the wrong direction; continue from this code path by lowering ArcFace pressure and adding an explicit FAR/hard-negative penalty, not by reverting to larger in-memory caches.
 
 Production feasibility metrics:
 - Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model thr_a=official_mobilefacenet/student_distill_w1_pairft_thr_a/mfn_w1_pairft_128d.int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`.
@@ -241,9 +244,9 @@ See `scrfd/quantization/README.md` for detailed QAT documentation.
 python3 xmodem/xmodem_send.py \
   --port=/dev/tty.usbmodem* \
   --baudrate=921600 \
-  --file=we2_image_gen_local/output_case1_sec_wlcsp/output.img \
-  --model="model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite 0x200000 0x0" \
-  --model="model_zoo/tflm_face_embedding/ghostfacenet/models/ghostfacenet_fixed_int8_vela.tflite 0x400000 0x0"
+  --file=we2_image_gen_local/output_case1_sec_wlcsp/cm55m_s_application.img \
+  --model="model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite 0x400000 0x0" \
+  --model="model_zoo/tflm_face_embedding/ghostfacenet/models/ghostfacenet_fixed_int8_vela.tflite 0x510000 0x0"
 ```
 
 ## Troubleshooting
