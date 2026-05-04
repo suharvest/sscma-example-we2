@@ -100,6 +100,7 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `run_cfp_only.py` | CFP-FP-only stress test for frontal/profile face pairs. Use this after LFW or when checking harder pose variation. |
 | `evaluate_w600k_compression.py` | PC-side 512D to 128D post-embedding compression check for `official_mobilefacenet/w600k_mbf_int8.tflite`. Compares baseline 512D, truncation, random projection, and PCA projection. This does not reduce Ethos-U tensor arena SRAM by itself. |
 | `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
+| `train_mfn_student_distill.py` | Trains a compact MobileFaceNet-style 128D student from w600k teacher embeddings. Use this for SRAM-reduction experiments; it supports width scaling, checkpoint continuation, weighted pairwise loss, and hard-negative margin loss. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -117,6 +118,14 @@ Recent 128D projection result:
 - LFW: 512D baseline `sep=0.5560 acc=97.8%`; 128D trained projection `sep=0.6008 acc=97.8%`.
 - CFP-FP: 512D baseline `sep=0.1110 acc=78.0%`; 128D trained projection `sep=0.1593 acc=79.7%`.
 - This projection is suitable for 128D matching experiments after w600k inference, but it does not reduce the w600k Ethos-U tensor arena peak SRAM.
+
+Recent S2 student compression result:
+- Training ran on WSL2 `wsl2-local` with `/home/harve/.local/bin/uv`; TensorFlow used RTX 3060 GPU.
+- `official_mobilefacenet/student_distill_w1_margin/mfn_w1_distill_128d.int8.tflite`: width `1.0`, 128D, 60 epochs, weighted pairwise + hard-negative distillation. Vela: `599.84 KiB` SRAM, `1057.14 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- `official_mobilefacenet/student_distill_w1_hardneg/mfn_w1_distill_128d.int8.tflite`: 24 more epochs from the width `1.0` checkpoint with lower LR and stricter negative margin. Vela: `599.84 KiB` SRAM, `1056.83 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Best hard-negative local evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k-512d=official_mobilefacenet/w600k_mbf_int8.tflite --model s2-w1-hardneg-i8=official_mobilefacenet/student_distill_w1_hardneg/mfn_w1_distill_128d.int8.tflite`.
+- Hard-negative S2 result: LFW `sep=0.1462 acc=73.9%`; CFP-FP `sep=0.1104 acc=78.0%`.
+- Conclusion: the S2 architecture meets the SRAM target, and CFP-FP is close to w600k, but LFW is still far below the w600k baseline (`sep=0.5560 acc=97.8%`). Do not replace w600k with this student yet. The next useful path is supervised identity or pair-based fine-tuning from aligned LFW/CFP or a larger labeled face dataset, not S3.
 
 ## SCRFD QAT Training
 
