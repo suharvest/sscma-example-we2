@@ -102,6 +102,7 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
 | `train_mfn_student_distill.py` | Trains a compact MobileFaceNet-style 128D student from w600k teacher embeddings. Use this for SRAM-reduction experiments; it supports width scaling, checkpoint continuation, weighted pairwise loss, and hard-negative margin loss. |
 | `train_mfn_student_pair_finetune.py` | Fine-tunes an S2 student with LFW DevTrain matched/mismatched pairs while retaining a configurable w600k projection distillation loss. Use this after distillation-only S2 when LFW different-person similarity remains too high. |
+| `run_s2_w1_pairft_conservative_remote.sh` | WSL2 remote sweep for conservative S2 pair fine-tuning. It reuses aligned/teacher caches, runs two higher-distillation 8-epoch variants, and is intended to test CFP retention before downloading larger face datasets. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -133,6 +134,12 @@ Recent S2 pair fine-tune result:
 - `official_mobilefacenet/student_distill_w1_pairft_balanced/mfn_w1_pairft_128d.int8.tflite`: balanced loss (`distill=1.0`, lower positive weight, stronger negative weight) gave LFW `sep=0.2510 acc=81.7%` and CFP-FP `sep=0.0813 acc=76.3%`.
 - Vela for the balanced pair fine-tune: `599.84 KiB` SRAM, `1056.28 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Conclusion: supervised pair loss improves LFW without increasing SRAM, but current local LFW-only supervision hurts cross-pose CFP-FP versus the hard-negative distillation model. Width `1.0` is not the immediate bottleneck; widening should wait until there is broader labeled training data or a better validation split.
+
+Recent conservative S2 pair fine-tune sweep:
+- Remote command: `bash /home/harve/gv2_face_train/tflm_face_embedding/run_s2_w1_pairft_conservative_remote.sh` on WSL2 `wsl2-local` with `/home/harve/.local/bin/uv`; TensorFlow created `GPU:0` on RTX 3060.
+- `official_mobilefacenet/student_distill_w1_pairft_distill2/mfn_w1_pairft_128d.int8.tflite`: 8 epochs from hard-negative weights, `distill=2.0`, `positive=0.4`, `negative=8.0`, `margin=0.03`. LFW `sep=0.1667 acc=77.8%`; CFP-FP `sep=0.1038 acc=79.7%`. Vela: `599.84 KiB` SRAM, `1057.09 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- `official_mobilefacenet/student_distill_w1_pairft_distill3/mfn_w1_pairft_128d.int8.tflite`: 8 epochs from hard-negative weights, `distill=3.0`, `positive=0.25`, `negative=8.0`, `margin=0.02`. LFW `sep=0.1642 acc=78.3%`; CFP-FP `sep=0.0977 acc=81.4%`. Vela: `599.84 KiB` SRAM, `1057.22 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Conclusion: higher teacher retention avoids the CFP-FP regression seen in LFW-heavy pair fine-tuning, but it cannot recover w600k-like LFW discrimination. Do not download more pair-only validation data first. If more data is needed, prioritize identity-labeled, multi-pose face training data and an ArcFace-style identity objective, then distill into the S2 architecture. The current local LFW pair supervision is useful for diagnosis but too narrow to be the main training signal.
 
 ## SCRFD QAT Training
 
