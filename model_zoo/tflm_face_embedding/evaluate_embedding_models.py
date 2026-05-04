@@ -166,6 +166,42 @@ def summarize_pairs(pairs, cache):
     }
 
 
+def error_rates_at_threshold(stats, threshold):
+    same = stats["same_sims"]
+    diff = stats["diff_sims"]
+    frr = float(np.mean(same < threshold))
+    far = float(np.mean(diff >= threshold))
+    tar = 1.0 - frr
+    acc = float((np.sum(same >= threshold) + np.sum(diff < threshold)) / (len(same) + len(diff)))
+    return {"far": far, "frr": frr, "tar": tar, "acc": acc}
+
+
+def verification_metrics(stats):
+    same = stats["same_sims"]
+    diff = stats["diff_sims"]
+    thresholds = np.unique(np.concatenate([same, diff, np.linspace(-1, 1, 1000)]))
+
+    fars = np.asarray([np.mean(diff >= t) for t in thresholds])
+    frrs = np.asarray([np.mean(same < t) for t in thresholds])
+    idx = int(np.argmin(np.abs(fars - frrs)))
+    eer = float((fars[idx] + frrs[idx]) / 2.0)
+    eer_threshold = float(thresholds[idx])
+
+    result = {"eer": eer, "eer_threshold": eer_threshold}
+    for target_far in (0.10, 0.05, 0.01):
+        valid = np.where(fars <= target_far)[0]
+        if len(valid) == 0:
+            result[f"tar@far{target_far:g}"] = 0.0
+            result[f"thr@far{target_far:g}"] = float(thresholds[-1])
+            result[f"far@far{target_far:g}"] = float(fars[-1])
+        else:
+            best_idx = valid[np.argmin(frrs[valid])]
+            result[f"tar@far{target_far:g}"] = float(1.0 - frrs[best_idx])
+            result[f"thr@far{target_far:g}"] = float(thresholds[best_idx])
+            result[f"far@far{target_far:g}"] = float(fars[best_idx])
+    return result
+
+
 def accuracy_at_threshold(stats, threshold):
     same = stats["same_sims"]
     diff = stats["diff_sims"]
@@ -222,6 +258,50 @@ def print_balanced_table(rows, dataset_names):
             f"{row['name']:<18} {row['dim']:>5} {summary['threshold']:>8.4f} "
             f"{summary['accs'][0]:>10.1%} {summary['accs'][1]:>12.1%} "
             f"{summary['floor']:>8.1%} {summary['gap']:>8.1%} {summary['score']:>8.3f}"
+        )
+
+
+def print_operating_table(rows, dataset_names):
+    print("\n# Shared-threshold operating point")
+    print("FAR = false accept rate; FRR = false reject rate at the balanced shared threshold.")
+    print(
+        f"{'Model':<18} {'Thr':>8} "
+        f"{dataset_names[0] + ' FAR':>10} {dataset_names[0] + ' FRR':>10} "
+        f"{dataset_names[1] + ' FAR':>12} {dataset_names[1] + ' FRR':>12}"
+    )
+    print("-" * 76)
+    ranked = []
+    for row in rows:
+        summary = balanced_summary(row, dataset_names)
+        if summary:
+            ranked.append((summary["score"], row, summary))
+    for _, row, summary in sorted(ranked, key=lambda item: item[0], reverse=True):
+        threshold = summary["threshold"]
+        rates = [error_rates_at_threshold(row["stats"][name], threshold) for name in dataset_names]
+        print(
+            f"{row['name']:<18} {threshold:>8.4f} "
+            f"{rates[0]['far']:>10.1%} {rates[0]['frr']:>10.1%} "
+            f"{rates[1]['far']:>12.1%} {rates[1]['frr']:>12.1%}"
+        )
+
+
+def print_verification_table(rows, dataset_name):
+    print(f"\n# {dataset_name} verification metrics")
+    print(
+        f"{'Model':<18} {'EER':>8} {'EER Thr':>8} "
+        f"{'TAR@FAR10':>10} {'TAR@FAR5':>10} {'TAR@FAR1':>10}"
+    )
+    print("-" * 76)
+    for row in rows:
+        stats = row["stats"].get(dataset_name)
+        if not stats:
+            print(f"{row['name']:<18} FAILED")
+            continue
+        metrics = verification_metrics(stats)
+        print(
+            f"{row['name']:<18} {metrics['eer']:>8.1%} {metrics['eer_threshold']:>8.4f} "
+            f"{metrics['tar@far0.1']:>10.1%} {metrics['tar@far0.05']:>10.1%} "
+            f"{metrics['tar@far0.01']:>10.1%}"
         )
 
 
@@ -299,7 +379,10 @@ def main():
 
     for dataset_name in datasets:
         print_table(rows, dataset_name)
+    for dataset_name in datasets:
+        print_verification_table(rows, dataset_name)
     print_balanced_table(rows, list(datasets.keys()))
+    print_operating_table(rows, list(datasets.keys()))
 
     print(f"\nDone in {time.time() - start:.0f}s")
 

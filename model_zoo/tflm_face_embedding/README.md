@@ -117,6 +117,7 @@ Important notes:
 - The current best-discriminating baseline found during recent testing was the original w600k quantized model: `official_mobilefacenet/w600k_mbf_int8.tflite`.
 - To evaluate a trained projection, pass it to `evaluate_w600k_compression.py`, for example: `uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz`.
 - `evaluate_embedding_models.py` also prints a balanced single-threshold table. Use that table for model selection because firmware normally needs one recognition threshold across scenes. The table reports the shared threshold, LFW/CFP-FP accuracy at that threshold, `Floor=min(LFW, CFP-FP)`, `Gap=abs(LFW-CFP-FP)`, and `Score=harmonic_mean(LFW, CFP-FP) - 0.25 * Gap`.
+- `evaluate_embedding_models.py` also prints production-oriented verification metrics: EER, TAR@FAR10%, TAR@FAR5%, TAR@FAR1%, and FAR/FRR at the balanced shared threshold. Use these for production feasibility and false-accept risk; the balanced score alone is not a production safety metric.
 - `compute_embedding.py` keeps firmware-equivalent SCRFD alignment by default. `evaluate_embedding_models.py` and `train_mfn_student_pair_finetune.py` enable an opt-in center-crop fallback for already-cropped benchmark faces when SCRFD detects no face. This makes CFP-FP profile evaluation/training complete instead of dropping hard profile crops.
 
 Recent 128D projection result:
@@ -176,6 +177,13 @@ Teacher-pair + hard-negative S2 result:
 - `official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`: continued from `thr_a` for 6 epochs with `teacher_pair_weight=0.5`, `mine_hard_negatives=1200`, threshold-aware loss unchanged. Full evaluation: LFW `sep=0.2066 acc=81.1%`; CFP-FP `sep=0.0831 acc=71.7%`; single-threshold score `0.725`, threshold `0.1064`, LFW@Thr `73.3%`, CFP@Thr `72.2%`, gap `1.1%`.
 - Vela for `tpair_hn_a`: `599.84 KiB` SRAM, `1056.86 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Current ranking under complete fallback evaluation: `tpair_hn_a` score `0.725`; `thr_a` score `0.714`; w600k score `0.705`. `tpair_hn_a` is the best current 128D candidate.
+
+Production feasibility metrics:
+- Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model thr_a=official_mobilefacenet/student_distill_w1_pairft_thr_a/mfn_w1_pairft_128d.int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`.
+- LFW verification: w600k EER `3.3%`, TAR@FAR5 `96.7%`; `thr_a` EER `20.0%`, TAR@FAR5 `67.5%`; `tpair_hn_a` EER `22.9%`, TAR@FAR5 `52.5%`.
+- CFP-FP verification: w600k EER `36.7%`, TAR@FAR5 `26.7%`; `thr_a` EER `38.3%`, TAR@FAR5 `24.2%`; `tpair_hn_a` EER `35.0%`, TAR@FAR5 `12.5%`.
+- At the balanced shared threshold, false-accept rates are high for all tested models: `tpair_hn_a` LFW FAR `75.0%`, CFP-FP FAR `55.0%`; w600k LFW FAR `56.7%`, CFP-FP FAR `63.3%`.
+- Feasibility conclusion: `tpair_hn_a` is useful as a low-SRAM balanced-experience candidate, but it is not production-ready for low-FAR/security-sensitive recognition. The next production gate needs a real business validation set and explicit FAR targets; the current local LFW/CFP subsets show that balanced accuracy can improve while false-accept risk remains too high.
 
 ## SCRFD QAT Training
 
