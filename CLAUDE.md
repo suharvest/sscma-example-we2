@@ -575,6 +575,42 @@ AT+FACE=0          # Disable face mode
 AT+BREAK           # Stop inference
 ```
 
+### Face Embedding Evaluation Scripts
+
+When reviewing FaceNet / MobileFaceNet accuracy, do not search the repo again. The useful scripts are in `model_zoo/tflm_face_embedding`:
+
+```bash
+cd /Users/harvest/project/grove_vision_2/sscma-example-we2/model_zoo/tflm_face_embedding
+
+# Simulates firmware preprocessing and compares PC vs device-style embeddings
+uv run python _device_compare.py
+
+# Full LFW + CFP-FP comparison: separation, best threshold accuracy, same/diff means
+uv run python run_full_comparison.py
+
+# CFP-FP-only stress test for frontal/profile pairs
+uv run python run_cfp_only.py
+
+# w600k 512D -> 128D post-embedding compression experiment
+uv run python evaluate_w600k_compression.py
+
+# Train a 512D -> 128D projection from cached w600k teacher embeddings
+uv run python train_w600k_projection_128d.py
+
+# Evaluate a trained projection against PCA/truncation/random projection
+uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz
+
+# Compare w600k against local lower-SRAM embedding candidates
+uv run python evaluate_embedding_models.py
+```
+
+Notes:
+- `_device_compare.py` is the "simulated device environment" entry point; it models the firmware INT8 input path such as `pixel - 129`.
+- Update each script's `models` dictionary before running. Some entries are historical and still point to `mobilefacenet_no_bn_*` or `mobilefacenet_qat_*`.
+- Vela `*_vela.tflite` files contain the `ethos-u` custom op and cannot be evaluated directly with PC TFLite. Evaluate pre-Vela INT8 for accuracy, then inspect Vela summary for SRAM, flash, and NPU coverage.
+- Recent testing indicated the original quantized w600k model, `official_mobilefacenet/w600k_mbf_int8.tflite`, was the discriminability baseline to preserve.
+- `evaluate_w600k_compression.py` checks whether 512D embeddings can be compressed to 128D after inference. It does not reduce Ethos-U tensor arena SRAM; use Vela summaries for that.
+
 ### Copying Firmware to ESP32 Project
 
 For ESP32 integration, copy the generated image:

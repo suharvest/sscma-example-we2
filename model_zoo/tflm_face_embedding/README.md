@@ -89,6 +89,35 @@ cd ../quantization
 ./run_qat_enhanced.sh
 ```
 
+## Evaluation Scripts
+
+Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
+
+| Script | Purpose |
+|--------|---------|
+| `_device_compare.py` | Simulates firmware-side preprocessing and embedding extraction. Use this when checking whether PC results match device behavior, including the `pixel - 129` INT8 input path. |
+| `run_full_comparison.py` | Full LFW + CFP-FP model comparison. Reports same-person vs different-person separation, best threshold accuracy, same mean, and diff mean across BASELINE/TTA/CENTER variants. |
+| `run_cfp_only.py` | CFP-FP-only stress test for frontal/profile face pairs. Use this after LFW or when checking harder pose variation. |
+| `evaluate_w600k_compression.py` | PC-side 512D to 128D post-embedding compression check for `official_mobilefacenet/w600k_mbf_int8.tflite`. Compares baseline 512D, truncation, random projection, and PCA projection. This does not reduce Ethos-U tensor arena SRAM by itself. |
+| `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
+| `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
+| `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
+
+Important notes:
+- The `models` dictionaries in these scripts may need to be updated before each experiment; older entries point to `mobilefacenet_no_bn_*` or `mobilefacenet_qat_*`.
+- Vela models with the `ethos-u` custom op cannot run directly in PC TFLite. Evaluate the pre-Vela INT8 model for accuracy, then use Vela summary/output for device memory and NPU coverage.
+- The current best-discriminating baseline found during recent testing was the original w600k quantized model: `official_mobilefacenet/w600k_mbf_int8.tflite`.
+- To evaluate a trained projection, pass it to `evaluate_w600k_compression.py`, for example: `uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz`.
+
+Recent 128D projection result:
+- Trained on WSL2 `wsl2-local` from 1196 valid w600k teacher embeddings with `train_w600k_projection_128d.py --num-train 1200 --steps 1000`.
+- Output: `outputs/w600k_projection_128d.npz`, including float32 projection weights and int8 projection weights.
+- Matrix size: 256 KiB float32, 64 KiB int8.
+- Local evaluation command: `uv run python evaluate_w600k_compression.py --max-pairs 120 --num-calib 800 --projection outputs/w600k_projection_128d.npz`.
+- LFW: 512D baseline `sep=0.5560 acc=97.8%`; 128D trained projection `sep=0.6008 acc=97.8%`.
+- CFP-FP: 512D baseline `sep=0.1110 acc=78.0%`; 128D trained projection `sep=0.1593 acc=79.7%`.
+- This projection is suitable for 128D matching experiments after w600k inference, but it does not reduce the w600k Ethos-U tensor arena peak SRAM.
+
 ## SCRFD QAT Training
 
 For improved SCRFD detection accuracy, use Quantization-Aware Training:
