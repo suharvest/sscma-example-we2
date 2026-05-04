@@ -101,8 +101,10 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `evaluate_w600k_compression.py` | PC-side 512D to 128D post-embedding compression check for `official_mobilefacenet/w600k_mbf_int8.tflite`. Compares baseline 512D, truncation, random projection, and PCA projection. This does not reduce Ethos-U tensor arena SRAM by itself. |
 | `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
 | `train_mfn_student_distill.py` | Trains a compact MobileFaceNet-style 128D student from w600k teacher embeddings. Use this for SRAM-reduction experiments; it supports width scaling, checkpoint continuation, weighted pairwise loss, and hard-negative margin loss. |
-| `train_mfn_student_pair_finetune.py` | Fine-tunes an S2 student with LFW DevTrain matched/mismatched pairs while retaining a configurable w600k projection distillation loss. Use this after distillation-only S2 when LFW different-person similarity remains too high. |
+| `train_mfn_student_pair_finetune.py` | Fine-tunes an S2 student with LFW DevTrain matched/mismatched pairs while retaining a configurable w600k projection distillation loss. It can optionally add CFP-FP train splits with `--cfp-splits`; reserve split 01 for evaluation. |
 | `run_s2_w1_pairft_conservative_remote.sh` | WSL2 remote sweep for conservative S2 pair fine-tuning. It reuses aligned/teacher caches, runs two higher-distillation 8-epoch variants, and is intended to test CFP retention before downloading larger face datasets. |
+| `run_s2_w1_pairft_score_sweep_remote.sh` | WSL2 remote sweep that continues from the balanced checkpoint and tries higher-distillation settings against the balanced single-threshold metric. |
+| `run_s2_w1_pairft_cfp_score_remote.sh` | WSL2 remote sweep that adds CFP-FP splits 02-10 as training pairs while leaving split 01 for evaluation. Use this only as a controlled cross-pose experiment. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -146,6 +148,11 @@ Balanced single-threshold S2 selection:
 - Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model hardneg=official_mobilefacenet/student_distill_w1_hardneg/mfn_w1_distill_128d.int8.tflite --model balanced=official_mobilefacenet/student_distill_w1_pairft_balanced/mfn_w1_pairft_128d.int8.tflite --model distill2=official_mobilefacenet/student_distill_w1_pairft_distill2/mfn_w1_pairft_128d.int8.tflite --model distill3=official_mobilefacenet/student_distill_w1_pairft_distill3/mfn_w1_pairft_128d.int8.tflite`.
 - Current ranking by `Score=harmonic_mean(LFW@Thr, CFP@Thr) - 0.25 * Gap`: `balanced` score `0.762`, shared threshold `0.1589`, LFW `76.1%`, CFP-FP `76.3%`; `distill2` score `0.753`; `distill3` score `0.751`; `hardneg` score `0.713`.
 - Use the balanced single-threshold table for deployment candidate selection. Use the per-dataset best-threshold tables only for diagnosis, because they hide threshold-transfer risk.
+
+Score-directed S2 training attempts:
+- Continuing from `balanced` with higher distillation (`score_a/b/c`) improved LFW best-threshold accuracy to `82.8%`, but lowered the single-threshold score to `0.720-0.724`. This shifts the similarity distribution and is worse for deployment.
+- Adding CFP-FP train splits 02-10 (`cfp_score_a`) improved best-threshold LFW/CFP to `82.8%/78.0%`, but the shared-threshold score dropped to `0.719` with threshold `0.0138`. Current SCRFD alignment also rejects many CFP profile images, so cross-pose training is partly bottlenecked by detection/alignment.
+- Conclusion: keep `student_distill_w1_pairft_balanced` as the current S2 deployment candidate. Further improvement should optimize the single-threshold objective directly and/or fix profile-face alignment before more pair fine-tuning.
 
 ## SCRFD QAT Training
 

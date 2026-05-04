@@ -31,6 +31,7 @@ from train_mfn_student_distill import (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LFW_DIR = SCRIPT_DIR / "datasets" / "lfw"
+CFP_DIR = SCRIPT_DIR / "datasets" / "cfp" / "cfp-dataset"
 MATCH_CSV = SCRIPT_DIR / "calibration_data" / "matchpairsDevTrain.csv"
 MISMATCH_CSV = SCRIPT_DIR / "calibration_data" / "mismatchpairsDevTrain.csv"
 SCRFD_MODEL = SCRIPT_DIR / "scrfd" / "models" / "scrfd_500m_kps_int8.tflite"
@@ -41,7 +42,64 @@ def lfw_image_path(name, index):
     return LFW_DIR / name / f"{name}_{int(index):04d}.jpg"
 
 
-def load_pairs(max_pairs=None):
+def parse_split_ids(value):
+    if not value:
+        return []
+    splits = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" in item:
+            start, end = item.split("-", 1)
+            splits.extend(range(int(start), int(end) + 1))
+        else:
+            splits.append(int(item))
+    return sorted(set(splits))
+
+
+def load_cfp_list(path):
+    mapping = {}
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    mapping[int(parts[0])] = parts[1]
+    return mapping
+
+
+def load_cfp_split_pairs(split_id, max_pairs_per_split):
+    frontal_map = load_cfp_list(CFP_DIR / "Protocol" / "Pair_list_F.txt")
+    profile_map = load_cfp_list(CFP_DIR / "Protocol" / "Pair_list_P.txt")
+
+    def idx_to_path(idx, mapping):
+        img_path = mapping.get(idx, "")
+        full_path = (CFP_DIR / "Protocol" / img_path).resolve()
+        return full_path if full_path.exists() else None
+
+    def read_pairs(path, label):
+        result = []
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line or "," not in line:
+                    continue
+                f_idx, p_idx = line.split(",", 1)
+                f_path = idx_to_path(int(f_idx), frontal_map)
+                p_path = idx_to_path(int(p_idx), profile_map)
+                if f_path and p_path:
+                    result.append((f_path, p_path, label))
+                if max_pairs_per_split and len(result) >= max_pairs_per_split:
+                    break
+        return result
+
+    split_dir = CFP_DIR / "Protocol" / "Split" / "FP" / f"{split_id:02d}"
+    return read_pairs(split_dir / "same.txt", 1.0) + read_pairs(split_dir / "diff.txt", 0.0)
+
+
+def load_pairs(max_pairs=None, cfp_splits="", cfp_max_pairs_per_split=0):
     paths = []
     path_to_idx = {}
     pairs = []
@@ -79,6 +137,14 @@ def load_pairs(max_pairs=None):
             pairs.append((a, b, 0.0))
             if max_pairs and len(pairs) >= pos_count + max_pairs:
                 break
+
+    for split_id in parse_split_ids(cfp_splits):
+        before = len(pairs)
+        for a_path, b_path, label in load_cfp_split_pairs(split_id, cfp_max_pairs_per_split):
+            a = add_path(a_path)
+            b = add_path(b_path)
+            pairs.append((a, b, label))
+        print(f"Loaded CFP-FP split {split_id:02d}: {len(pairs) - before} pairs")
 
     return paths, np.asarray(pairs, dtype=np.float32)
 
@@ -233,6 +299,8 @@ def main():
     parser.add_argument("--positive-weight", type=float, default=2.0)
     parser.add_argument("--negative-weight", type=float, default=8.0)
     parser.add_argument("--negative-margin", type=float, default=0.05)
+    parser.add_argument("--cfp-splits", default="", help="Optional CFP-FP train splits, e.g. 2-10. Split 01 is reserved for evaluation.")
+    parser.add_argument("--cfp-max-pairs-per-split", type=int, default=0)
     args = parser.parse_args()
 
     if Path.cwd().resolve() != SCRIPT_DIR:
@@ -243,7 +311,7 @@ def main():
     out_prefix = args.out_dir / name
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    paths, pairs = load_pairs(args.max_pairs)
+    paths, pairs = load_pairs(args.max_pairs, args.cfp_splits, args.cfp_max_pairs_per_split)
     print(f"Loaded {len(paths)} unique LFW paths and {len(pairs)} pairs")
     images, kept_paths = align_images(paths, args.out_dir / f"{name}_aligned_lfw.npz")
     pairs = remap_pairs(paths, kept_paths, pairs)
