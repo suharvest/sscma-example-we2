@@ -111,6 +111,7 @@ Important notes:
 - Vela models with the `ethos-u` custom op cannot run directly in PC TFLite. Evaluate the pre-Vela INT8 model for accuracy, then use Vela summary/output for device memory and NPU coverage.
 - The current best-discriminating baseline found during recent testing was the original w600k quantized model: `official_mobilefacenet/w600k_mbf_int8.tflite`.
 - To evaluate a trained projection, pass it to `evaluate_w600k_compression.py`, for example: `uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz`.
+- `evaluate_embedding_models.py` also prints a balanced single-threshold table. Use that table for model selection because firmware normally needs one recognition threshold across scenes. The table reports the shared threshold, LFW/CFP-FP accuracy at that threshold, `Floor=min(LFW, CFP-FP)`, `Gap=abs(LFW-CFP-FP)`, and `Score=harmonic_mean(LFW, CFP-FP) - 0.25 * Gap`.
 
 Recent 128D projection result:
 - Trained on WSL2 `wsl2-local` from 1196 valid w600k teacher embeddings with `train_w600k_projection_128d.py --num-train 1200 --steps 1000`.
@@ -140,6 +141,11 @@ Recent conservative S2 pair fine-tune sweep:
 - `official_mobilefacenet/student_distill_w1_pairft_distill2/mfn_w1_pairft_128d.int8.tflite`: 8 epochs from hard-negative weights, `distill=2.0`, `positive=0.4`, `negative=8.0`, `margin=0.03`. LFW `sep=0.1667 acc=77.8%`; CFP-FP `sep=0.1038 acc=79.7%`. Vela: `599.84 KiB` SRAM, `1057.09 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - `official_mobilefacenet/student_distill_w1_pairft_distill3/mfn_w1_pairft_128d.int8.tflite`: 8 epochs from hard-negative weights, `distill=3.0`, `positive=0.25`, `negative=8.0`, `margin=0.02`. LFW `sep=0.1642 acc=78.3%`; CFP-FP `sep=0.0977 acc=81.4%`. Vela: `599.84 KiB` SRAM, `1057.22 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Conclusion: higher teacher retention avoids the CFP-FP regression seen in LFW-heavy pair fine-tuning, but it cannot recover w600k-like LFW discrimination. Do not download more pair-only validation data first. If more data is needed, prioritize identity-labeled, multi-pose face training data and an ArcFace-style identity objective, then distill into the S2 architecture. The current local LFW pair supervision is useful for diagnosis but too narrow to be the main training signal.
+
+Balanced single-threshold S2 selection:
+- Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model hardneg=official_mobilefacenet/student_distill_w1_hardneg/mfn_w1_distill_128d.int8.tflite --model balanced=official_mobilefacenet/student_distill_w1_pairft_balanced/mfn_w1_pairft_128d.int8.tflite --model distill2=official_mobilefacenet/student_distill_w1_pairft_distill2/mfn_w1_pairft_128d.int8.tflite --model distill3=official_mobilefacenet/student_distill_w1_pairft_distill3/mfn_w1_pairft_128d.int8.tflite`.
+- Current ranking by `Score=harmonic_mean(LFW@Thr, CFP@Thr) - 0.25 * Gap`: `balanced` score `0.762`, shared threshold `0.1589`, LFW `76.1%`, CFP-FP `76.3%`; `distill2` score `0.753`; `distill3` score `0.751`; `hardneg` score `0.713`.
+- Use the balanced single-threshold table for deployment candidate selection. Use the per-dataset best-threshold tables only for diagnosis, because they hide threshold-transfer risk.
 
 ## SCRFD QAT Training
 

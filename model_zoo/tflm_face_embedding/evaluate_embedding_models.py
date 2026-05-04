@@ -157,7 +157,68 @@ def summarize_pairs(pairs, cache):
         "s_min": float(ss.min()),
         "d_max": float(ds.max()),
         "n": f"{len(ss)}s/{len(ds)}d",
+        "same_sims": ss,
+        "diff_sims": ds,
     }
+
+
+def accuracy_at_threshold(stats, threshold):
+    same = stats["same_sims"]
+    diff = stats["diff_sims"]
+    return float((np.sum(same >= threshold) + np.sum(diff < threshold)) / (len(same) + len(diff)))
+
+
+def balanced_summary(row, dataset_names):
+    stats_by_dataset = row["stats"]
+    if any(not stats_by_dataset.get(name) for name in dataset_names):
+        return None
+
+    best = None
+    for threshold in np.linspace(-1, 1, 800):
+        accs = [accuracy_at_threshold(stats_by_dataset[name], threshold) for name in dataset_names]
+        macro = float(np.mean(accs))
+        floor = float(np.min(accs))
+        gap = float(np.max(accs) - np.min(accs))
+        hmean = float(len(accs) / np.sum([1.0 / max(acc, 1e-6) for acc in accs]))
+        score = hmean - 0.25 * gap
+        candidate = {
+            "threshold": float(threshold),
+            "accs": accs,
+            "macro": macro,
+            "floor": floor,
+            "gap": gap,
+            "hmean": hmean,
+            "score": score,
+        }
+        key = (score, floor, macro, -gap)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1]
+
+
+def print_balanced_table(rows, dataset_names):
+    print("\n# Balanced single-threshold selection")
+    print("Score = harmonic_mean(LFW_acc, CFP_acc) - 0.25 * abs_gap; higher is better.")
+    print(
+        f"{'Model':<18} {'Dim':>5} {'Thr':>8} "
+        f"{dataset_names[0] + '@Thr':>10} {dataset_names[1] + '@Thr':>12} "
+        f"{'Floor':>8} {'Gap':>8} {'Score':>8}"
+    )
+    print("-" * 88)
+    ranked = []
+    for row in rows:
+        summary = balanced_summary(row, dataset_names)
+        if summary:
+            ranked.append((summary["score"], row, summary))
+        else:
+            print(f"{row['name']:<18} {row['dim']:>5} FAILED")
+
+    for _, row, summary in sorted(ranked, key=lambda item: item[0], reverse=True):
+        print(
+            f"{row['name']:<18} {row['dim']:>5} {summary['threshold']:>8.4f} "
+            f"{summary['accs'][0]:>10.1%} {summary['accs'][1]:>12.1%} "
+            f"{summary['floor']:>8.1%} {summary['gap']:>8.1%} {summary['score']:>8.3f}"
+        )
 
 
 def print_table(rows, dataset_name):
@@ -234,6 +295,7 @@ def main():
 
     for dataset_name in datasets:
         print_table(rows, dataset_name)
+    print_balanced_table(rows, list(datasets.keys()))
 
     print(f"\nDone in {time.time() - start:.0f}s")
 
