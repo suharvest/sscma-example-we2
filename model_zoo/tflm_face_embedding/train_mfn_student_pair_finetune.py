@@ -278,22 +278,37 @@ def identity_from_path(path):
     return str(path)
 
 
-def identity_labels(kept_paths, min_images):
-    identities = [identity_from_path(path) for path in kept_paths]
+def identity_labels_for_paths(paths, class_to_label):
+    labels = [class_to_label.get(identity_from_path(path), -1) for path in paths]
+    return np.asarray(labels, dtype=np.int32)
+
+
+def build_identity_label_sets(kept_paths, identity_paths, min_images):
+    all_paths = list(kept_paths) + [str(path) for path in identity_paths]
+    identities = [identity_from_path(path) for path in all_paths]
     counts = {}
     for identity in identities:
         counts[identity] = counts.get(identity, 0) + 1
 
     class_names = sorted(identity for identity, count in counts.items() if count >= min_images)
     class_to_label = {identity: i for i, identity in enumerate(class_names)}
-    labels = np.asarray([class_to_label.get(identity, -1) for identity in identities], dtype=np.int32)
-    valid_images = int(np.sum(labels >= 0))
+    pair_labels = identity_labels_for_paths(kept_paths, class_to_label)
+    identity_labels = identity_labels_for_paths(identity_paths, class_to_label)
+    valid_images = int(np.sum(pair_labels >= 0) + np.sum(identity_labels >= 0))
     print(
         f"ArcFace identities: classes={len(class_names)} "
-        f"valid_images={valid_images}/{len(labels)} min_images={min_images}",
+        f"valid_images={valid_images}/{len(all_paths)} min_images={min_images} "
+        f"pair_valid={int(np.sum(pair_labels >= 0))}/{len(pair_labels)} "
+        f"stream_valid={int(np.sum(identity_labels >= 0))}/{len(identity_labels)}",
         flush=True,
     )
-    return labels, class_names
+    valid_stream = identity_labels >= 0
+    return (
+        pair_labels,
+        np.asarray([str(path) for path in identity_paths], dtype=str)[valid_stream],
+        identity_labels[valid_stream],
+        class_names,
+    )
 
 
 def mine_hard_negatives(model, images, kept_paths, max_pairs, batch_size):
@@ -357,6 +372,8 @@ def fine_tune(
     threshold_margin,
     teacher_pair_weight,
     identity_label_values,
+    identity_stream_paths,
+    identity_stream_labels,
     arcface_weight,
     arcface_scale,
     arcface_margin,
@@ -381,13 +398,22 @@ def fine_tune(
             trainable=True,
             name="arcface_weights",
         )
-    identity_indices = np.where(identity_label_values >= 0)[0].astype(np.int32)
     identity_ds = None
-    if arcface_weight > 0 and len(identity_indices):
+    if arcface_weight > 0 and len(identity_stream_paths):
+        def load_identity_sample(path, label):
+            image = tf.io.read_file(path)
+            image = tf.io.decode_image(image, channels=3, expand_animations=False)
+            image = tf.image.resize(image, [112, 112], method=tf.image.ResizeMethod.BILINEAR)
+            image = tf.cast(image, tf.float32)
+            image = (image / 127.5) - 1.0
+            image.set_shape([112, 112, 3])
+            return image, label
+
         identity_ds = (
-            tf.data.Dataset.from_tensor_slices(identity_indices)
-            .shuffle(len(identity_indices), reshuffle_each_iteration=True)
+            tf.data.Dataset.from_tensor_slices((identity_stream_paths, identity_stream_labels))
+            .shuffle(len(identity_stream_paths), reshuffle_each_iteration=True)
             .repeat()
+            .map(load_identity_sample, num_parallel_calls=tf.data.AUTOTUNE)
             .batch(batch_size)
             .prefetch(tf.data.AUTOTUNE)
         )
@@ -487,16 +513,12 @@ def fine_tune(
         return loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss, arcface_loss
 
     @tf.function
-    def arcface_step(batch_indices):
-        labels = tf.gather(labels_tf, batch_indices)
+    def arcface_step(batch_x, labels):
         with tf.GradientTape() as tape:
-            batch_x = tf.gather(x_tf, batch_indices)
-            target = tf.math.l2_normalize(tf.gather(target_tf, batch_indices), axis=-1)
             pred = model(batch_x, training=True)
             pred_n = tf.math.l2_normalize(pred, axis=-1)
-            distill_loss = tf.reduce_mean(1.0 - tf.reduce_sum(pred_n * target, axis=-1))
             arcface_loss = arcface_loss_for_embeddings(pred_n, labels)
-            loss = distill_weight * distill_loss + arcface_weight * arcface_loss
+            loss = arcface_weight * arcface_loss
 
         trainable_variables = model.trainable_variables
         if arcface_weights is not None:
@@ -504,7 +526,7 @@ def fine_tune(
         grads = tape.gradient(loss, trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
         opt.apply_gradients(zip(grads, trainable_variables))
-        return loss, distill_loss, arcface_loss
+        return loss, arcface_loss
 
     for epoch in range(1, epochs + 1):
         losses = []
@@ -529,8 +551,8 @@ def fine_tune(
         if identity_ds is not None and arcface_steps_per_epoch > 0:
             identity_iter = iter(identity_ds)
             for _ in range(arcface_steps_per_epoch):
-                _, identity_distill_loss, identity_arcface_loss = arcface_step(next(identity_iter))
-                identity_distill_losses.append(float(identity_distill_loss))
+                batch_x, batch_labels = next(identity_iter)
+                _, identity_arcface_loss = arcface_step(batch_x, batch_labels)
                 identity_arcface_losses.append(float(identity_arcface_loss))
 
         print(
@@ -594,12 +616,13 @@ def main():
 
     paths, pairs = load_pairs(args.max_pairs, args.cfp_splits, args.cfp_max_pairs_per_split)
     identity_paths = load_identity_paths(args.identity_dirs, args.max_identity_images)
-    paths.extend(identity_paths)
-    print(f"Loaded {len(paths)} unique image paths and {len(pairs)} pairs")
+    print(
+        f"Loaded {len(paths)} pair image paths, {len(identity_paths)} streaming identity paths, "
+        f"and {len(pairs)} pairs"
+    )
     images, kept_paths = align_images(
         paths,
         args.out_dir / f"{name}_aligned_lfw.npz",
-        prealigned_roots=identity_roots(args.identity_dirs),
     )
     pairs = remap_pairs(paths, kept_paths, pairs)
     print(f"Kept {len(images)} aligned images and {len(pairs)} valid pairs")
@@ -616,7 +639,11 @@ def main():
         pairs = np.concatenate([pairs, mined_pairs], axis=0)
         print(f"Training pairs after hard-negative mining: {len(pairs)}")
 
-    id_labels, class_names = identity_labels(kept_paths, args.arcface_min_images)
+    id_labels, identity_stream_paths, identity_stream_labels, class_names = build_identity_label_sets(
+        kept_paths,
+        identity_paths,
+        args.arcface_min_images,
+    )
     weights_path = args.out_dir / f"{name}.weights.h5"
     fine_tune(
         model,
@@ -638,6 +665,8 @@ def main():
         args.threshold_margin,
         args.teacher_pair_weight,
         id_labels,
+        identity_stream_paths,
+        identity_stream_labels,
         args.arcface_weight,
         args.arcface_scale,
         args.arcface_margin,
