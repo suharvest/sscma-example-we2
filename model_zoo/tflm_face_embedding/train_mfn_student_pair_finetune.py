@@ -195,9 +195,64 @@ def remap_pairs(paths, kept_paths, pairs):
     return np.asarray(remapped, dtype=np.float32)
 
 
+def identity_from_path(path):
+    parts = Path(str(path)).parts
+    if "lfw" in parts:
+        idx = parts.index("lfw")
+        if idx + 1 < len(parts):
+            return f"lfw:{parts[idx + 1]}"
+    if "Images" in parts:
+        idx = parts.index("Images")
+        if idx + 1 < len(parts):
+            return f"cfp:{parts[idx + 1]}"
+    return str(path)
+
+
+def mine_hard_negatives(model, images, kept_paths, max_pairs, batch_size):
+    if max_pairs <= 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    x = (images.astype(np.float32) / 127.5) - 1.0
+    embeddings = []
+    for start in range(0, len(x), batch_size):
+        pred = model(x[start:start + batch_size], training=False)
+        pred = tf.math.l2_normalize(pred, axis=-1).numpy().astype(np.float32)
+        embeddings.append(pred)
+    embeddings = np.concatenate(embeddings, axis=0)
+
+    identities = np.asarray([identity_from_path(path) for path in kept_paths])
+    sim = embeddings @ embeddings.T
+    same_identity = identities[:, None] == identities[None, :]
+    upper = np.triu(np.ones(sim.shape, dtype=bool), k=1)
+    valid = upper & ~same_identity
+    scores = sim[valid]
+    if len(scores) == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    take = min(max_pairs, len(scores))
+    candidate_indices = np.argpartition(scores, -take)[-take:]
+    row_idx, col_idx = np.where(valid)
+    selected = candidate_indices[np.argsort(scores[candidate_indices])[::-1]]
+    pairs = np.stack(
+        [
+            row_idx[selected].astype(np.float32),
+            col_idx[selected].astype(np.float32),
+            np.zeros(len(selected), dtype=np.float32),
+        ],
+        axis=1,
+    )
+    print(
+        f"Mined {len(pairs)} hard negatives: "
+        f"sim_max={scores[selected[0]]:.4f} sim_min={scores[selected[-1]]:.4f}",
+        flush=True,
+    )
+    return pairs.astype(np.float32)
+
+
 def fine_tune(
     model,
     images,
+    teacher512,
     target128,
     pairs,
     epochs,
@@ -212,6 +267,7 @@ def fine_tune(
     threshold_weight,
     threshold,
     threshold_margin,
+    teacher_pair_weight,
 ):
     x = (images.astype(np.float32) / 127.5) - 1.0
     pair_ds = tf.data.Dataset.from_tensor_slices(pairs)
@@ -219,6 +275,7 @@ def fine_tune(
     opt = tf.keras.optimizers.Adam(learning_rate=lr)
 
     x_tf = tf.constant(x, dtype=tf.float32)
+    teacher_tf = tf.constant(teacher512, dtype=tf.float32)
     target_tf = tf.constant(target128, dtype=tf.float32)
 
     @tf.function
@@ -229,19 +286,25 @@ def fine_tune(
         with tf.GradientTape() as tape:
             xa = tf.gather(x_tf, idx_a)
             xb = tf.gather(x_tf, idx_b)
+            teacher_a = tf.gather(teacher_tf, idx_a)
+            teacher_b = tf.gather(teacher_tf, idx_b)
             ta = tf.gather(target_tf, idx_a)
             tb = tf.gather(target_tf, idx_b)
 
             pa = tf.math.l2_normalize(model(xa, training=True), axis=-1)
             pb = tf.math.l2_normalize(model(xb, training=True), axis=-1)
+            teacher_a = tf.math.l2_normalize(teacher_a, axis=-1)
+            teacher_b = tf.math.l2_normalize(teacher_b, axis=-1)
             ta = tf.math.l2_normalize(ta, axis=-1)
             tb = tf.math.l2_normalize(tb, axis=-1)
 
             sim = tf.reduce_sum(pa * pb, axis=-1)
+            teacher_sim = tf.reduce_sum(teacher_a * teacher_b, axis=-1)
             distill_loss = 0.5 * tf.reduce_mean(
                 1.0 - tf.reduce_sum(pa * ta, axis=-1)
                 + 1.0 - tf.reduce_sum(pb * tb, axis=-1)
             )
+            teacher_pair_loss = tf.reduce_mean(tf.square(sim - teacher_sim))
 
             pos_mask = labels
             neg_mask = 1.0 - labels
@@ -263,12 +326,13 @@ def fine_tune(
                 + positive_weight * pos_loss
                 + negative_weight * neg_loss
                 + threshold_weight * threshold_loss
+                + teacher_pair_weight * teacher_pair_loss
             )
 
         grads = tape.gradient(loss, model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
         opt.apply_gradients(zip(grads, model.trainable_variables))
-        return loss, distill_loss, pos_loss, neg_loss, threshold_loss
+        return loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss
 
     for epoch in range(1, epochs + 1):
         losses = []
@@ -276,13 +340,15 @@ def fine_tune(
         pos_losses = []
         neg_losses = []
         threshold_losses = []
+        teacher_pair_losses = []
         for batch_pairs in pair_ds:
-            loss, distill_loss, pos_loss, neg_loss, threshold_loss = step(batch_pairs)
+            loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss = step(batch_pairs)
             losses.append(float(loss))
             distill_losses.append(float(distill_loss))
             pos_losses.append(float(pos_loss))
             neg_losses.append(float(neg_loss))
             threshold_losses.append(float(threshold_loss))
+            teacher_pair_losses.append(float(teacher_pair_loss))
 
         print(
             f"epoch {epoch:03d}/{epochs} "
@@ -290,7 +356,8 @@ def fine_tune(
             f"distill={np.mean(distill_losses):.5f} "
             f"pos={np.mean(pos_losses):.5f} "
             f"neg={np.mean(neg_losses):.5f} "
-            f"thr={np.mean(threshold_losses):.5f}",
+            f"thr={np.mean(threshold_losses):.5f} "
+            f"tpair={np.mean(teacher_pair_losses):.5f}",
             flush=True,
         )
         if checkpoint_every > 0 and epoch % checkpoint_every == 0:
@@ -318,6 +385,8 @@ def main():
     parser.add_argument("--threshold-weight", type=float, default=0.0)
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--threshold-margin", type=float, default=0.04)
+    parser.add_argument("--teacher-pair-weight", type=float, default=0.0)
+    parser.add_argument("--mine-hard-negatives", type=int, default=0)
     parser.add_argument("--cfp-splits", default="", help="Optional CFP-FP train splits, e.g. 2-10. Split 01 is reserved for evaluation.")
     parser.add_argument("--cfp-max-pairs-per-split", type=int, default=0)
     args = parser.parse_args()
@@ -343,11 +412,16 @@ def main():
     model.load_weights(args.init_weights)
     print(f"Loaded initial weights: {args.init_weights}")
     print(f"Model params: {model.count_params():,}")
+    mined_pairs = mine_hard_negatives(model, images, kept_paths, args.mine_hard_negatives, args.batch_size)
+    if len(mined_pairs):
+        pairs = np.concatenate([pairs, mined_pairs], axis=0)
+        print(f"Training pairs after hard-negative mining: {len(pairs)}")
 
     weights_path = args.out_dir / f"{name}.weights.h5"
     fine_tune(
         model,
         images,
+        teacher512,
         target128,
         pairs,
         args.epochs,
@@ -362,6 +436,7 @@ def main():
         args.threshold_weight,
         args.threshold,
         args.threshold_margin,
+        args.teacher_pair_weight,
     )
     model.save_weights(weights_path)
     print(f"Saved weights: {weights_path}")
