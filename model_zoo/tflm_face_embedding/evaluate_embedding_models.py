@@ -15,6 +15,7 @@ import compute_embedding
 # CFP-FP images are already face-cropped. Keep this consistent with
 # run_cfp_only.py so profile/frontal pairs are not rejected as oversized.
 compute_embedding.MAX_FACE_RATIO = 1.0
+compute_embedding.ALLOW_CENTER_CROP_FALLBACK = True
 
 from compute_embedding import FaceEmbeddingPipeline, cosine_similarity  # noqa: E402
 
@@ -120,13 +121,16 @@ def load_cfp_pairs(max_pairs):
 def compute_embeddings(pipeline, paths):
     cache = {}
     failures = 0
+    fallbacks = 0
     for path in sorted(set(paths)):
         try:
             result = pipeline.compute(Image.open(path), debug=False)
             cache[path] = result["embedding"].astype(np.float32)
+            if result.get("fallback"):
+                fallbacks += 1
         except Exception:
             failures += 1
-    return cache, failures
+    return cache, failures, fallbacks
 
 
 def summarize_pairs(pairs, cache):
@@ -282,8 +286,8 @@ def main():
         compute_embedding.EMB_OUTPUT_DIM = dim
         print(f"\nEvaluating {name}: {model} ({dim}D)")
         pipeline = FaceEmbeddingPipeline(SCRFD_MODEL, model, backend="tflite")
-        cache, failures = compute_embeddings(pipeline, all_paths)
-        print(f"Computed {len(cache)} embeddings (failures={failures})")
+        cache, failures, fallbacks = compute_embeddings(pipeline, all_paths)
+        print(f"Computed {len(cache)} embeddings (failures={failures}, fallbacks={fallbacks})")
 
         rows.append(
             {

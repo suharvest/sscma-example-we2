@@ -158,6 +158,7 @@ def align_images(paths, cache_path):
         return data["images"].astype(np.uint8), np.asarray(cached_paths)
 
     compute_embedding.MAX_FACE_RATIO = 1.0
+    compute_embedding.ALLOW_CENTER_CROP_FALLBACK = True
     pipeline = FaceEmbeddingPipeline(str(SCRFD_MODEL), str(TEACHER_MODEL), backend="tflite")
 
     images = []

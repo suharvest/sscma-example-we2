@@ -105,6 +105,7 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `run_s2_w1_pairft_conservative_remote.sh` | WSL2 remote sweep for conservative S2 pair fine-tuning. It reuses aligned/teacher caches, runs two higher-distillation 8-epoch variants, and is intended to test CFP retention before downloading larger face datasets. |
 | `run_s2_w1_pairft_score_sweep_remote.sh` | WSL2 remote sweep that continues from the balanced checkpoint and tries higher-distillation settings against the balanced single-threshold metric. |
 | `run_s2_w1_pairft_cfp_score_remote.sh` | WSL2 remote sweep that adds CFP-FP splits 02-10 as training pairs while leaving split 01 for evaluation. Use this only as a controlled cross-pose experiment. |
+| `run_s2_w1_pairft_cfp_fallback_remote.sh` | WSL2 remote sweep after enabling cropped-face fallback. Trains with CFP-FP splits 02-10 and reuses the generated fallback aligned/teacher caches. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -114,6 +115,7 @@ Important notes:
 - The current best-discriminating baseline found during recent testing was the original w600k quantized model: `official_mobilefacenet/w600k_mbf_int8.tflite`.
 - To evaluate a trained projection, pass it to `evaluate_w600k_compression.py`, for example: `uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz`.
 - `evaluate_embedding_models.py` also prints a balanced single-threshold table. Use that table for model selection because firmware normally needs one recognition threshold across scenes. The table reports the shared threshold, LFW/CFP-FP accuracy at that threshold, `Floor=min(LFW, CFP-FP)`, `Gap=abs(LFW-CFP-FP)`, and `Score=harmonic_mean(LFW, CFP-FP) - 0.25 * Gap`.
+- `compute_embedding.py` keeps firmware-equivalent SCRFD alignment by default. `evaluate_embedding_models.py` and `train_mfn_student_pair_finetune.py` enable an opt-in center-crop fallback for already-cropped benchmark faces when SCRFD detects no face. This makes CFP-FP profile evaluation/training complete instead of dropping hard profile crops.
 
 Recent 128D projection result:
 - Trained on WSL2 `wsl2-local` from 1196 valid w600k teacher embeddings with `train_w600k_projection_128d.py --num-train 1200 --steps 1000`.
@@ -153,6 +155,13 @@ Score-directed S2 training attempts:
 - Continuing from `balanced` with higher distillation (`score_a/b/c`) improved LFW best-threshold accuracy to `82.8%`, but lowered the single-threshold score to `0.720-0.724`. This shifts the similarity distribution and is worse for deployment.
 - Adding CFP-FP train splits 02-10 (`cfp_score_a`) improved best-threshold LFW/CFP to `82.8%/78.0%`, but the shared-threshold score dropped to `0.719` with threshold `0.0138`. Current SCRFD alignment also rejects many CFP profile images, so cross-pose training is partly bottlenecked by detection/alignment.
 - Conclusion: keep `student_distill_w1_pairft_balanced` as the current S2 deployment candidate. Further improvement should optimize the single-threshold objective directly and/or fix profile-face alignment before more pair fine-tuning.
+
+Profile fallback S2 result:
+- Enabling cropped-face fallback changed CFP-FP evaluation from partial `44s/15d` to full `120s/60d`; each evaluated model used `72` fallback images and had `0` failures.
+- New full CFP-FP baseline: `w600k` score `0.705` (`LFW@Thr=81.1%`, `CFP@Thr=67.8%`, gap `13.3%`); `student_distill_w1_pairft_balanced` score `0.690` (`68.9%/69.4%`, gap `0.6%`).
+- `official_mobilefacenet/student_distill_w1_pairft_cfp_fb_b/mfn_w1_pairft_128d.int8.tflite`: trained from `balanced` with fallback-aligned LFW + CFP-FP splits 02-10, `distill=0.8`, `positive=1.0`, `negative=12.0`, `margin=0.03`. Full evaluation: LFW `sep=0.2621 acc=81.7%`; CFP-FP `sep=0.0973 acc=73.3%`; single-threshold score `0.700`, threshold `0.0138`, LFW@Thr `69.4%`, CFP@Thr `71.7%`, gap `2.2%`.
+- Vela for `cfp_fb_b`: `599.83 KiB` SRAM, `1056.80 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Conclusion: `cfp_fb_b` is the best current 128D/SRAM candidate under the complete CFP-FP fallback evaluation. It is slightly below w600k score but much more balanced across LFW/CFP and remains well under 1 MiB SRAM.
 
 ## SCRFD QAT Training
 

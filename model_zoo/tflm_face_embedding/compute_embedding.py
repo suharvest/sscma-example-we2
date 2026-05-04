@@ -57,6 +57,7 @@ FACE_NMS_THRESHOLD = 0.40
 MIN_FACE_SIZE = 40
 CENTER_DIST_THRESH_RATIO = 0.3
 MAX_FACE_RATIO = 0.6
+ALLOW_CENTER_CROP_FALLBACK = False
 
 # ArcFace canonical reference landmarks for 112x112 (face_alignment.c:21-27)
 REFERENCE_LANDMARKS = np.array(
@@ -551,6 +552,26 @@ def apply_face_alignment(
     return dst
 
 
+def center_crop_resize_rgb(bgr_planar: np.ndarray) -> np.ndarray:
+    """
+    Fallback for already-cropped benchmark faces when detector/landmarks fail.
+
+    This is intentionally opt-in and is not firmware-equivalent. It keeps CFP-FP
+    profile crops usable for embedding evaluation/training instead of treating
+    detector failure as recognition failure.
+    """
+    src_h, src_w = bgr_planar.shape[1], bgr_planar.shape[2]
+    side = min(src_w, src_h)
+    x0 = max((src_w - side) // 2, 0)
+    y0 = max((src_h - side) // 2, 0)
+    crop_bgr = bgr_planar[:, y0:y0 + side, x0:x0 + side]
+    crop_rgb = np.transpose(crop_bgr[::-1], (1, 2, 0))
+    return np.asarray(
+        Image.fromarray(crop_rgb).resize((EMB_INPUT_W, EMB_INPUT_H), Image.BILINEAR),
+        dtype=np.uint8,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Step 11: L2 normalization
 # ---------------------------------------------------------------------------
@@ -785,22 +806,35 @@ class FaceEmbeddingPipeline:
 
         # Step 6: Get best face
         best = get_best_face(dets, MIN_FACE_SIZE)
+        used_fallback = False
         if best is None:
-            raise RuntimeError("No face detected (try a clearer front-facing photo)")
+            if not ALLOW_CENTER_CROP_FALLBACK:
+                raise RuntimeError("No face detected (try a clearer front-facing photo)")
+            aligned_face = center_crop_resize_rgb(bgr_planar)
+            best = {
+                "bbox": (0.0, 0.0, float(img_w), float(img_h)),
+                "score": 0.0,
+                "landmarks": [(0.0, 0.0)] * SCRFD_NUM_LANDMARKS,
+            }
+            used_fallback = True
 
         if debug:
-            print(f"  Best face: bbox=({best['bbox'][0]:.0f},{best['bbox'][1]:.0f},"
-                  f"{best['bbox'][2]:.0f}x{best['bbox'][3]:.0f}) score={best['score']:.3f}")
+            if used_fallback:
+                print("  No SCRFD face; using center-crop fallback")
+            else:
+                print(f"  Best face: bbox=({best['bbox'][0]:.0f},{best['bbox'][1]:.0f},"
+                      f"{best['bbox'][2]:.0f}x{best['bbox'][3]:.0f}) score={best['score']:.3f}")
 
         # Validate face
-        if best["bbox"][2] < MIN_FACE_SIZE or best["bbox"][3] < MIN_FACE_SIZE:
+        if not used_fallback and (best["bbox"][2] < MIN_FACE_SIZE or best["bbox"][3] < MIN_FACE_SIZE):
             raise RuntimeError(f"Face too small: {best['bbox'][2]:.0f}x{best['bbox'][3]:.0f}")
 
-        # Step 7: Compute alignment transform
-        M = compute_face_alignment(best["landmarks"])
+        if not used_fallback:
+            # Step 7: Compute alignment transform
+            M = compute_face_alignment(best["landmarks"])
 
-        # Step 8: Affine warp
-        aligned_face = apply_face_alignment(bgr_planar, M)
+            # Step 8: Affine warp
+            aligned_face = apply_face_alignment(bgr_planar, M)
 
         # Step 9: Prepare embedding model input
         if self.emb_input_dtype == np.int8:
@@ -864,8 +898,8 @@ class FaceEmbeddingPipeline:
         embedding = l2_normalize(embedding)
 
         # Quality and pose
-        quality = estimate_face_quality(best["landmarks"])
-        pose = estimate_face_pose(best["landmarks"])
+        quality = 0.0 if used_fallback else estimate_face_quality(best["landmarks"])
+        pose = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0} if used_fallback else estimate_face_pose(best["landmarks"])
 
         return {
             "embedding": embedding,
@@ -875,6 +909,7 @@ class FaceEmbeddingPipeline:
             "aligned_face": aligned_face,
             "quality": quality,
             "pose": pose,
+            "fallback": used_fallback,
         }
 
     def _run_onnx(
