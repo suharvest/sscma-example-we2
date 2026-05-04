@@ -101,6 +101,7 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `evaluate_w600k_compression.py` | PC-side 512D to 128D post-embedding compression check for `official_mobilefacenet/w600k_mbf_int8.tflite`. Compares baseline 512D, truncation, random projection, and PCA projection. This does not reduce Ethos-U tensor arena SRAM by itself. |
 | `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
 | `train_mfn_student_distill.py` | Trains a compact MobileFaceNet-style 128D student from w600k teacher embeddings. Use this for SRAM-reduction experiments; it supports width scaling, checkpoint continuation, weighted pairwise loss, and hard-negative margin loss. |
+| `train_mfn_student_pair_finetune.py` | Fine-tunes an S2 student with LFW DevTrain matched/mismatched pairs while retaining a configurable w600k projection distillation loss. Use this after distillation-only S2 when LFW different-person similarity remains too high. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -126,6 +127,12 @@ Recent S2 student compression result:
 - Best hard-negative local evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k-512d=official_mobilefacenet/w600k_mbf_int8.tflite --model s2-w1-hardneg-i8=official_mobilefacenet/student_distill_w1_hardneg/mfn_w1_distill_128d.int8.tflite`.
 - Hard-negative S2 result: LFW `sep=0.1462 acc=73.9%`; CFP-FP `sep=0.1104 acc=78.0%`.
 - Conclusion: the S2 architecture meets the SRAM target, and CFP-FP is close to w600k, but LFW is still far below the w600k baseline (`sep=0.5560 acc=97.8%`). Do not replace w600k with this student yet. The next useful path is supervised identity or pair-based fine-tuning from aligned LFW/CFP or a larger labeled face dataset, not S3.
+
+Recent S2 pair fine-tune result:
+- `official_mobilefacenet/student_distill_w1_pairft/mfn_w1_pairft_128d.int8.tflite`: LFW improved to `sep=0.3231 acc=81.1%`, but CFP-FP regressed to `sep=0.0754 acc=74.6%`.
+- `official_mobilefacenet/student_distill_w1_pairft_balanced/mfn_w1_pairft_128d.int8.tflite`: balanced loss (`distill=1.0`, lower positive weight, stronger negative weight) gave LFW `sep=0.2510 acc=81.7%` and CFP-FP `sep=0.0813 acc=76.3%`.
+- Vela for the balanced pair fine-tune: `599.84 KiB` SRAM, `1056.28 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Conclusion: supervised pair loss improves LFW without increasing SRAM, but current local LFW-only supervision hurts cross-pose CFP-FP versus the hard-negative distillation model. Width `1.0` is not the immediate bottleneck; widening should wait until there is broader labeled training data or a better validation split.
 
 ## SCRFD QAT Training
 
