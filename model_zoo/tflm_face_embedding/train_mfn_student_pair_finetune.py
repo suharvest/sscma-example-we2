@@ -149,7 +149,67 @@ def load_pairs(max_pairs=None, cfp_splits="", cfp_max_pairs_per_split=0):
     return paths, np.asarray(pairs, dtype=np.float32)
 
 
-def align_images(paths, cache_path):
+def load_identity_paths(identity_dirs, max_identity_images=0):
+    if not identity_dirs:
+        return []
+
+    paths = []
+    for value in identity_dirs.split(","):
+        root = Path(value.strip())
+        if not root:
+            continue
+        if not root.is_absolute():
+            root = SCRIPT_DIR / root
+        if not root.exists():
+            raise FileNotFoundError(f"Identity dataset not found: {root}")
+
+        found = sorted(
+            p
+            for p in root.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+        if max_identity_images and len(found) > max_identity_images:
+            rng = np.random.default_rng(42)
+            found = [found[i] for i in rng.permutation(len(found))[:max_identity_images]]
+        paths.extend(found)
+        print(f"Loaded identity dataset paths: {root} images={len(found)}")
+    return paths
+
+
+def identity_roots(identity_dirs):
+    roots = []
+    if not identity_dirs:
+        return roots
+    for value in identity_dirs.split(","):
+        root = Path(value.strip())
+        if not root:
+            continue
+        if not root.is_absolute():
+            root = SCRIPT_DIR / root
+        roots.append(root.resolve())
+    return roots
+
+
+def is_under(path, roots):
+    resolved = Path(path).resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def load_prealigned_image(path):
+    img = Image.open(path).convert("RGB")
+    if img.size != (112, 112):
+        img = img.resize((112, 112), Image.BILINEAR)
+    return np.asarray(img, dtype=np.uint8)
+
+
+def align_images(paths, cache_path, prealigned_roots=None):
+    prealigned_roots = prealigned_roots or []
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists():
         data = np.load(cache_path, allow_pickle=False)
@@ -164,11 +224,17 @@ def align_images(paths, cache_path):
     images = []
     kept_paths = []
     kept_index = {}
+    prealigned_count = 0
     for i, path in enumerate(paths):
         try:
-            result = pipeline.compute(Image.open(path).convert("RGB"), debug=False)
+            if is_under(path, prealigned_roots):
+                aligned_face = load_prealigned_image(path)
+                prealigned_count += 1
+            else:
+                result = pipeline.compute(Image.open(path).convert("RGB"), debug=False)
+                aligned_face = result["aligned_face"].astype(np.uint8)
             kept_index[i] = len(images)
-            images.append(result["aligned_face"].astype(np.uint8))
+            images.append(aligned_face)
             kept_paths.append(str(path))
         except Exception as exc:
             print(f"skip {path}: {exc}")
@@ -179,7 +245,7 @@ def align_images(paths, cache_path):
         raise RuntimeError("No LFW images aligned")
 
     np.savez(cache_path, images=np.stack(images), paths=np.asarray(kept_paths))
-    print(f"Saved aligned cache: {cache_path}")
+    print(f"Saved aligned cache: {cache_path} (prealigned={prealigned_count})")
 
     return np.stack(images), np.asarray(kept_paths)
 
@@ -205,7 +271,29 @@ def identity_from_path(path):
         idx = parts.index("Images")
         if idx + 1 < len(parts):
             return f"cfp:{parts[idx + 1]}"
+    if "glint360k_subset_112" in parts:
+        idx = parts.index("glint360k_subset_112")
+        if idx + 1 < len(parts):
+            return f"glint:{parts[idx + 1]}"
     return str(path)
+
+
+def identity_labels(kept_paths, min_images):
+    identities = [identity_from_path(path) for path in kept_paths]
+    counts = {}
+    for identity in identities:
+        counts[identity] = counts.get(identity, 0) + 1
+
+    class_names = sorted(identity for identity, count in counts.items() if count >= min_images)
+    class_to_label = {identity: i for i, identity in enumerate(class_names)}
+    labels = np.asarray([class_to_label.get(identity, -1) for identity in identities], dtype=np.int32)
+    valid_images = int(np.sum(labels >= 0))
+    print(
+        f"ArcFace identities: classes={len(class_names)} "
+        f"valid_images={valid_images}/{len(labels)} min_images={min_images}",
+        flush=True,
+    )
+    return labels, class_names
 
 
 def mine_hard_negatives(model, images, kept_paths, max_pairs, batch_size):
@@ -268,6 +356,12 @@ def fine_tune(
     threshold,
     threshold_margin,
     teacher_pair_weight,
+    identity_label_values,
+    arcface_weight,
+    arcface_scale,
+    arcface_margin,
+    arcface_num_classes,
+    arcface_steps_per_epoch,
 ):
     x = (images.astype(np.float32) / 127.5) - 1.0
     pair_ds = tf.data.Dataset.from_tensor_slices(pairs)
@@ -277,6 +371,57 @@ def fine_tune(
     x_tf = tf.constant(x, dtype=tf.float32)
     teacher_tf = tf.constant(teacher512, dtype=tf.float32)
     target_tf = tf.constant(target128, dtype=tf.float32)
+    labels_tf = tf.constant(identity_label_values, dtype=tf.int32)
+    embedding_dim = int(model.output_shape[-1])
+    arcface_weights = None
+    if arcface_weight > 0 and arcface_num_classes > 1:
+        init = tf.keras.initializers.GlorotUniform()
+        arcface_weights = tf.Variable(
+            init(shape=(arcface_num_classes, embedding_dim), dtype=tf.float32),
+            trainable=True,
+            name="arcface_weights",
+        )
+    identity_indices = np.where(identity_label_values >= 0)[0].astype(np.int32)
+    identity_ds = None
+    if arcface_weight > 0 and len(identity_indices):
+        identity_ds = (
+            tf.data.Dataset.from_tensor_slices(identity_indices)
+            .shuffle(len(identity_indices), reshuffle_each_iteration=True)
+            .repeat()
+            .batch(batch_size)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    def arcface_loss_for_embeddings(embeddings, labels):
+        if arcface_weights is None:
+            return tf.constant(0.0, dtype=tf.float32)
+
+        valid = labels >= 0
+        valid_embeddings = tf.boolean_mask(embeddings, valid)
+        valid_labels = tf.boolean_mask(labels, valid)
+
+        def compute_loss():
+            emb = tf.math.l2_normalize(valid_embeddings, axis=-1)
+            weights = tf.math.l2_normalize(arcface_weights, axis=-1)
+            cosine = tf.matmul(emb, weights, transpose_b=True)
+            cosine = tf.clip_by_value(cosine, -1.0 + 1e-7, 1.0 - 1e-7)
+
+            target_cosine = tf.gather(cosine, valid_labels, axis=1, batch_dims=1)
+            sine = tf.sqrt(tf.maximum(1.0 - tf.square(target_cosine), 0.0))
+            margin_cos = tf.cos(tf.constant(arcface_margin, dtype=tf.float32))
+            margin_sin = tf.sin(tf.constant(arcface_margin, dtype=tf.float32))
+            threshold_cos = tf.cos(tf.constant(np.pi, dtype=tf.float32) - arcface_margin)
+            mm = tf.sin(tf.constant(np.pi, dtype=tf.float32) - arcface_margin) * arcface_margin
+            phi = target_cosine * margin_cos - sine * margin_sin
+            phi = tf.where(target_cosine > threshold_cos, phi, target_cosine - mm)
+
+            one_hot = tf.one_hot(valid_labels, arcface_num_classes, dtype=tf.float32)
+            logits = (one_hot * tf.expand_dims(phi, axis=1) + (1.0 - one_hot) * cosine) * arcface_scale
+            return tf.reduce_mean(
+                tf.keras.losses.sparse_categorical_crossentropy(valid_labels, logits, from_logits=True)
+            )
+
+        return tf.cond(tf.size(valid_labels) > 0, compute_loss, lambda: tf.constant(0.0, dtype=tf.float32))
 
     @tf.function
     def step(batch_pairs):
@@ -290,6 +435,8 @@ def fine_tune(
             teacher_b = tf.gather(teacher_tf, idx_b)
             ta = tf.gather(target_tf, idx_a)
             tb = tf.gather(target_tf, idx_b)
+            label_a = tf.gather(labels_tf, idx_a)
+            label_b = tf.gather(labels_tf, idx_b)
 
             pa = tf.math.l2_normalize(model(xa, training=True), axis=-1)
             pb = tf.math.l2_normalize(model(xb, training=True), axis=-1)
@@ -321,18 +468,43 @@ def fine_tune(
                 + tf.reduce_sum(tf.square(tf.nn.relu(sim - neg_threshold)) * neg_mask)
                 / (tf.reduce_sum(neg_mask) + 1e-6)
             )
+            arcface_loss = arcface_loss_for_embeddings(tf.concat([pa, pb], axis=0), tf.concat([label_a, label_b], axis=0))
             loss = (
                 distill_weight * distill_loss
                 + positive_weight * pos_loss
                 + negative_weight * neg_loss
                 + threshold_weight * threshold_loss
                 + teacher_pair_weight * teacher_pair_loss
+                + arcface_weight * arcface_loss
             )
 
-        grads = tape.gradient(loss, model.trainable_variables)
+        trainable_variables = model.trainable_variables
+        if arcface_weights is not None:
+            trainable_variables = trainable_variables + [arcface_weights]
+        grads = tape.gradient(loss, trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
-        opt.apply_gradients(zip(grads, model.trainable_variables))
-        return loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss
+        opt.apply_gradients(zip(grads, trainable_variables))
+        return loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss, arcface_loss
+
+    @tf.function
+    def arcface_step(batch_indices):
+        labels = tf.gather(labels_tf, batch_indices)
+        with tf.GradientTape() as tape:
+            batch_x = tf.gather(x_tf, batch_indices)
+            target = tf.math.l2_normalize(tf.gather(target_tf, batch_indices), axis=-1)
+            pred = model(batch_x, training=True)
+            pred_n = tf.math.l2_normalize(pred, axis=-1)
+            distill_loss = tf.reduce_mean(1.0 - tf.reduce_sum(pred_n * target, axis=-1))
+            arcface_loss = arcface_loss_for_embeddings(pred_n, labels)
+            loss = distill_weight * distill_loss + arcface_weight * arcface_loss
+
+        trainable_variables = model.trainable_variables
+        if arcface_weights is not None:
+            trainable_variables = trainable_variables + [arcface_weights]
+        grads = tape.gradient(loss, trainable_variables)
+        grads, _ = tf.clip_by_global_norm(grads, 5.0)
+        opt.apply_gradients(zip(grads, trainable_variables))
+        return loss, distill_loss, arcface_loss
 
     for epoch in range(1, epochs + 1):
         losses = []
@@ -341,14 +513,25 @@ def fine_tune(
         neg_losses = []
         threshold_losses = []
         teacher_pair_losses = []
+        arcface_losses = []
+        identity_arcface_losses = []
+        identity_distill_losses = []
         for batch_pairs in pair_ds:
-            loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss = step(batch_pairs)
+            loss, distill_loss, pos_loss, neg_loss, threshold_loss, teacher_pair_loss, arcface_loss = step(batch_pairs)
             losses.append(float(loss))
             distill_losses.append(float(distill_loss))
             pos_losses.append(float(pos_loss))
             neg_losses.append(float(neg_loss))
             threshold_losses.append(float(threshold_loss))
             teacher_pair_losses.append(float(teacher_pair_loss))
+            arcface_losses.append(float(arcface_loss))
+
+        if identity_ds is not None and arcface_steps_per_epoch > 0:
+            identity_iter = iter(identity_ds)
+            for _ in range(arcface_steps_per_epoch):
+                _, identity_distill_loss, identity_arcface_loss = arcface_step(next(identity_iter))
+                identity_distill_losses.append(float(identity_distill_loss))
+                identity_arcface_losses.append(float(identity_arcface_loss))
 
         print(
             f"epoch {epoch:03d}/{epochs} "
@@ -357,7 +540,10 @@ def fine_tune(
             f"pos={np.mean(pos_losses):.5f} "
             f"neg={np.mean(neg_losses):.5f} "
             f"thr={np.mean(threshold_losses):.5f} "
-            f"tpair={np.mean(teacher_pair_losses):.5f}",
+            f"tpair={np.mean(teacher_pair_losses):.5f} "
+            f"arc={np.mean(arcface_losses):.5f} "
+            f"id_distill={np.mean(identity_distill_losses) if identity_distill_losses else 0.0:.5f} "
+            f"id_arc={np.mean(identity_arcface_losses) if identity_arcface_losses else 0.0:.5f}",
             flush=True,
         )
         if checkpoint_every > 0 and epoch % checkpoint_every == 0:
@@ -387,6 +573,13 @@ def main():
     parser.add_argument("--threshold-margin", type=float, default=0.04)
     parser.add_argument("--teacher-pair-weight", type=float, default=0.0)
     parser.add_argument("--mine-hard-negatives", type=int, default=0)
+    parser.add_argument("--arcface-weight", type=float, default=0.0)
+    parser.add_argument("--arcface-scale", type=float, default=32.0)
+    parser.add_argument("--arcface-margin", type=float, default=0.35)
+    parser.add_argument("--arcface-min-images", type=int, default=2)
+    parser.add_argument("--arcface-steps-per-epoch", type=int, default=0)
+    parser.add_argument("--identity-dirs", default="", help="Optional comma-separated identity image roots, e.g. datasets/glint360k_subset_112.")
+    parser.add_argument("--max-identity-images", type=int, default=0)
     parser.add_argument("--cfp-splits", default="", help="Optional CFP-FP train splits, e.g. 2-10. Split 01 is reserved for evaluation.")
     parser.add_argument("--cfp-max-pairs-per-split", type=int, default=0)
     args = parser.parse_args()
@@ -400,8 +593,14 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     paths, pairs = load_pairs(args.max_pairs, args.cfp_splits, args.cfp_max_pairs_per_split)
-    print(f"Loaded {len(paths)} unique LFW paths and {len(pairs)} pairs")
-    images, kept_paths = align_images(paths, args.out_dir / f"{name}_aligned_lfw.npz")
+    identity_paths = load_identity_paths(args.identity_dirs, args.max_identity_images)
+    paths.extend(identity_paths)
+    print(f"Loaded {len(paths)} unique image paths and {len(pairs)} pairs")
+    images, kept_paths = align_images(
+        paths,
+        args.out_dir / f"{name}_aligned_lfw.npz",
+        prealigned_roots=identity_roots(args.identity_dirs),
+    )
     pairs = remap_pairs(paths, kept_paths, pairs)
     print(f"Kept {len(images)} aligned images and {len(pairs)} valid pairs")
 
@@ -417,6 +616,7 @@ def main():
         pairs = np.concatenate([pairs, mined_pairs], axis=0)
         print(f"Training pairs after hard-negative mining: {len(pairs)}")
 
+    id_labels, class_names = identity_labels(kept_paths, args.arcface_min_images)
     weights_path = args.out_dir / f"{name}.weights.h5"
     fine_tune(
         model,
@@ -437,6 +637,12 @@ def main():
         args.threshold,
         args.threshold_margin,
         args.teacher_pair_weight,
+        id_labels,
+        args.arcface_weight,
+        args.arcface_scale,
+        args.arcface_margin,
+        len(class_names),
+        args.arcface_steps_per_epoch,
     )
     model.save_weights(weights_path)
     print(f"Saved weights: {weights_path}")

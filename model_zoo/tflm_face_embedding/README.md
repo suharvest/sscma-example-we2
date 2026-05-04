@@ -102,12 +102,15 @@ Use these from `model_zoo/tflm_face_embedding` with `uv run python ...`.
 | `train_w600k_projection_128d.py` | Trains a 512D to 128D projection from cached w600k teacher embeddings. Produces `outputs/w600k_projection_128d.npz` with float32 and int8 projection weights for later integration experiments. |
 | `train_mfn_student_distill.py` | Trains a compact MobileFaceNet-style 128D student from w600k teacher embeddings. Use this for SRAM-reduction experiments; it supports width scaling, checkpoint continuation, weighted pairwise loss, and hard-negative margin loss. |
 | `train_mfn_student_pair_finetune.py` | Fine-tunes an S2 student with LFW DevTrain matched/mismatched pairs while retaining a configurable w600k projection distillation loss. It can optionally add CFP-FP train splits with `--cfp-splits`; reserve split 01 for evaluation. |
+| `download_glint360k_subset.py` | Downloads a bounded aligned Glint360K WebDataset subset from Hugging Face into `datasets/glint360k_subset_112/<identity>/*.jpg`. Use for internal/research training unless dataset licensing is cleared for product use. |
 | `run_s2_w1_pairft_conservative_remote.sh` | WSL2 remote sweep for conservative S2 pair fine-tuning. It reuses aligned/teacher caches, runs two higher-distillation 8-epoch variants, and is intended to test CFP retention before downloading larger face datasets. |
 | `run_s2_w1_pairft_score_sweep_remote.sh` | WSL2 remote sweep that continues from the balanced checkpoint and tries higher-distillation settings against the balanced single-threshold metric. |
 | `run_s2_w1_pairft_cfp_score_remote.sh` | WSL2 remote sweep that adds CFP-FP splits 02-10 as training pairs while leaving split 01 for evaluation. Use this only as a controlled cross-pose experiment. |
 | `run_s2_w1_pairft_cfp_fallback_remote.sh` | WSL2 remote sweep after enabling cropped-face fallback. Trains with CFP-FP splits 02-10 and reuses the generated fallback aligned/teacher caches. |
 | `run_s2_w1_pairft_threshold_remote.sh` | WSL2 remote sweep that continues from `cfp_fb_b` and adds threshold-aware hinge loss around the deployment threshold. |
 | `run_s2_w1_pairft_teacher_hn_remote.sh` | WSL2 remote sweep that continues from `thr_a`, adds teacher 512D pair-similarity loss, and mines high-similarity different-identity hard negatives. |
+| `run_s2_w1_pairft_arcface_remote.sh` | WSL2 remote sweep that continues from `tpair_hn_a` and adds a training-only ArcFace identity head. The exported TFLite still contains only the compact embedding model. |
+| `run_s2_w1_pairft_glint_arcface_remote.sh` | WSL2 remote run that downloads a Glint360K aligned subset and adds external identity images to ArcFace training. |
 | `evaluate_embedding_models.py` | Compares multiple pre-Vela embedding models on the same local LFW/CFP pairs. Use this before considering a lower-SRAM model swap. |
 | `compute_embedding.py` | Shared PC-side SCRFD + alignment + embedding pipeline used by the evaluation scripts. Also useful for one-off image pair checks. |
 
@@ -177,6 +180,27 @@ Teacher-pair + hard-negative S2 result:
 - `official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`: continued from `thr_a` for 6 epochs with `teacher_pair_weight=0.5`, `mine_hard_negatives=1200`, threshold-aware loss unchanged. Full evaluation: LFW `sep=0.2066 acc=81.1%`; CFP-FP `sep=0.0831 acc=71.7%`; single-threshold score `0.725`, threshold `0.1064`, LFW@Thr `73.3%`, CFP@Thr `72.2%`, gap `1.1%`.
 - Vela for `tpair_hn_a`: `599.84 KiB` SRAM, `1056.86 KiB` flash, `CPU ops=0`, `NPU=100%`.
 - Current ranking under complete fallback evaluation: `tpair_hn_a` score `0.725`; `thr_a` score `0.714`; w600k score `0.705`. `tpair_hn_a` is the best current 128D candidate.
+
+ArcFace fine-tuning path:
+- `train_mfn_student_pair_finetune.py` supports a training-only ArcFace identity head via `--arcface-weight`, `--arcface-scale`, `--arcface-margin`, and `--arcface-min-images`. Identities are inferred from LFW/CFP paths; identities with fewer than `--arcface-min-images` aligned images are ignored by the ArcFace loss.
+- The ArcFace classifier weights are not part of the exported model. They are used only to shape the student embedding space during training, so exported SRAM/flash should remain governed by the same compact student backbone.
+- `run_s2_w1_pairft_arcface_remote.sh` continues from `tpair_hn_a` and tries conservative ArcFace weights.
+- Result: ArcFace trained correctly but did not improve this local benchmark. `arc_a` used `arcface_weight=0.05`, `margin=0.25`; `arc_b` used `arcface_weight=0.10`, `margin=0.35`. Both used `1046` ArcFace classes and `3636/5103` aligned images. Losses decreased across 8 epochs for both runs.
+- Full evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite --model arc_a=official_mobilefacenet/student_distill_w1_pairft_arc_a/mfn_w1_pairft_128d.int8.tflite --model arc_b=official_mobilefacenet/student_distill_w1_pairft_arc_b/mfn_w1_pairft_128d.int8.tflite`.
+- `arc_a`: LFW `sep=0.2034 acc=80.6%`; CFP-FP `sep=0.0735 acc=70.6%`; single-threshold score `0.681`; LFW EER `23.3%`; CFP-FP EER `41.7%`.
+- `arc_b`: LFW `sep=0.2061 acc=80.0%`; CFP-FP `sep=0.0728 acc=72.2%`; single-threshold score `0.684`; LFW EER `23.3%`; CFP-FP EER `40.0%`.
+- Vela: both ArcFace exports remain `599.84 KiB` SRAM, `CPU ops=0`, `NPU=100%`; flash is `1056.25 KiB` for `arc_a` and `1055.92 KiB` for `arc_b`.
+- Conclusion: keep `tpair_hn_a` as the current best 128D candidate. ArcFace is wired into the pipeline, but with the current small/narrow LFW+CFP identity set it shifts the similarity distribution in the wrong direction. Use ArcFace again only with broader identity-labeled training data or a stronger teacher-generated identity/pseudo-label set.
+
+Glint360K subset experiment:
+- Download command used by `run_s2_w1_pairft_glint_arcface_remote.sh`: `uv run python download_glint360k_subset.py --output-dir datasets/glint360k_subset_112 --start-shard 0 --num-shards 8 --max-images 50000 --max-images-per-id 20`. This produced `50000` aligned images across `39574` identities on WSL2.
+- The first 50k-image training attempt generated a `2.0 GiB` aligned cache and `108 MiB` teacher cache, then exited around GPU initialization. The current `train_mfn_student_pair_finetune.py` keeps the full image tensor as a TensorFlow constant; larger identity runs need a streaming dataset implementation before using 50k/100k images safely.
+- `official_mobilefacenet/student_distill_w1_pairft_glint_arc_c/mfn_w1_pairft_128d.int8.tflite`: trained from `tpair_hn_a` with `10000` Glint images, plus LFW + CFP-FP train splits 02-10. It used `15103` total images, `1562` ArcFace classes, and `4710/15103` images eligible for ArcFace (`min_images=2`). Training loss decreased from `3.81251` to `2.61406`; identity ArcFace loss decreased from `18.83940` to `16.91416`.
+- Evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite --model glint_arc_c=official_mobilefacenet/student_distill_w1_pairft_glint_arc_c/mfn_w1_pairft_128d.int8.tflite`.
+- `glint_arc_c` local metrics: LFW `sep=0.2215 acc=77.2%`; CFP-FP `sep=0.0719 acc=70.6%`; single-threshold score `0.712` versus `tpair_hn_a` score `0.725`.
+- Low-FAR changes versus `tpair_hn_a`: LFW TAR@FAR5 improved `52.5% -> 57.5%`, LFW TAR@FAR1 improved `29.2% -> 44.2%`; CFP-FP TAR@FAR5 improved `12.5% -> 17.5%`, CFP-FP TAR@FAR1 improved `3.3% -> 4.2%`.
+- Vela for `glint_arc_c`: `599.84 KiB` SRAM, `1055.95 KiB` flash, `CPU ops=0`, `NPU=100%`.
+- Conclusion: `glint_arc_c` is not the new best balanced candidate, but it is the first run where extra identity data improves low-FAR behavior. Keep `tpair_hn_a` as the current deployment/experience candidate; continue with Glint data after changing training to stream identity batches and tuning the ArcFace/threshold loss balance.
 
 Production feasibility metrics:
 - Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model thr_a=official_mobilefacenet/student_distill_w1_pairft_thr_a/mfn_w1_pairft_128d.int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`.
