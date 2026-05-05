@@ -9,7 +9,7 @@ export ALL_PROXY="socks5://127.0.0.1:7890"
 
 DATASET_DIR="datasets/glint360k_balanced_200k_min4_112"
 INIT_WEIGHTS="official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.weights.h5"
-OUT_DIR="official_mobilefacenet/student_distill_w1_pairft_glint_arc_bal200k_a"
+OUT_DIR="official_mobilefacenet/student_distill_w1_pairft_glint_arc_bal200k_b"
 LOG_DIR="logs"
 mkdir -p "${LOG_DIR}"
 
@@ -38,32 +38,32 @@ current_images() {
     mkdir -p "${OUT_DIR}"
     /home/harve/.local/bin/uv run python -u train_mfn_student_pair_finetune.py \
         --width 1.0 \
-        --epochs 8 \
+        --epochs 10 \
         --batch-size 128 \
-        --lr 0.000008 \
+        --lr 0.000006 \
         --out-dir "${OUT_DIR}" \
         --init-weights "${INIT_WEIGHTS}" \
         --checkpoint-every 4 \
-        --distill-weight 0.8 \
+        --distill-weight 1.0 \
         --positive-weight 1.0 \
-        --negative-weight 12.0 \
+        --negative-weight 16.0 \
         --negative-margin 0.03 \
-        --threshold-weight 0.5 \
-        --threshold 0.02 \
-        --threshold-margin 0.04 \
-        --teacher-pair-weight 0.5 \
-        --mine-hard-negatives 1200 \
-        --arcface-weight 0.05 \
+        --threshold-weight 1.2 \
+        --threshold 0.08 \
+        --threshold-margin 0.05 \
+        --teacher-pair-weight 1.0 \
+        --mine-hard-negatives 2000 \
+        --arcface-weight 0.01 \
         --arcface-scale 32.0 \
-        --arcface-margin 0.25 \
+        --arcface-margin 0.20 \
         --arcface-min-images 2 \
-        --arcface-steps-per-epoch 500 \
+        --arcface-steps-per-epoch 100 \
         --identity-dirs "${DATASET_DIR}" \
         --max-identity-images 200000 \
         --cfp-splits 2-10 \
         --cfp-max-pairs-per-split 80 \
         --num-calib 500
     date
-} > "${LOG_DIR}/s2_w1_pairft_glint_arc_bal200k_a.log" 2>&1 &
+} > "${LOG_DIR}/s2_w1_pairft_glint_arc_bal200k_b.log" 2>&1 &
 
 echo $!

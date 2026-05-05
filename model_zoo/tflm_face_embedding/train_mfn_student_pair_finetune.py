@@ -271,9 +271,8 @@ def identity_from_path(path):
         idx = parts.index("Images")
         if idx + 1 < len(parts):
             return f"cfp:{parts[idx + 1]}"
-    if "glint360k_subset_112" in parts:
-        idx = parts.index("glint360k_subset_112")
-        if idx + 1 < len(parts):
+    for idx, part in enumerate(parts):
+        if part.startswith("glint360k_") and idx + 1 < len(parts):
             return f"glint:{parts[idx + 1]}"
     return str(path)
 
