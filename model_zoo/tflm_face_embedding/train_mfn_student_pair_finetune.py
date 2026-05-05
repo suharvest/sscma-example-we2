@@ -370,6 +370,8 @@ def fine_tune(
     threshold,
     threshold_margin,
     teacher_pair_weight,
+    hard_positive_fraction,
+    hard_negative_fraction,
     identity_label_values,
     identity_stream_paths,
     identity_stream_labels,
@@ -448,6 +450,25 @@ def fine_tune(
 
         return tf.cond(tf.size(valid_labels) > 0, compute_loss, lambda: tf.constant(0.0, dtype=tf.float32))
 
+    def masked_mean(values, mask):
+        return tf.reduce_sum(values * mask) / (tf.reduce_sum(mask) + 1e-6)
+
+    def masked_hard_mean(values, mask, fraction):
+        selected = tf.boolean_mask(values, mask > 0)
+
+        def top_mean():
+            count = tf.size(selected)
+            k_float = tf.cast(count, tf.float32) * tf.constant(fraction, dtype=tf.float32)
+            k = tf.maximum(1, tf.cast(tf.math.ceil(k_float), tf.int32))
+            top_values, _ = tf.math.top_k(selected, k=k, sorted=False)
+            return tf.reduce_mean(top_values)
+
+        return tf.cond(
+            tf.logical_and(tf.size(selected) > 0, tf.constant(fraction, dtype=tf.float32) > 0.0),
+            top_mean,
+            lambda: tf.constant(0.0, dtype=tf.float32),
+        )
+
     @tf.function
     def step(batch_pairs):
         idx_a = tf.cast(batch_pairs[:, 0], tf.int32)
@@ -480,18 +501,31 @@ def fine_tune(
 
             pos_mask = labels
             neg_mask = 1.0 - labels
-            pos_loss = tf.reduce_sum((1.0 - sim) * pos_mask) / (tf.reduce_sum(pos_mask) + 1e-6)
-            neg_loss = (
-                tf.reduce_sum(tf.square(tf.nn.relu(sim - negative_margin)) * neg_mask)
-                / (tf.reduce_sum(neg_mask) + 1e-6)
-            )
+            pos_values = 1.0 - sim
+            neg_values = tf.square(tf.nn.relu(sim - negative_margin))
+            if hard_positive_fraction > 0:
+                pos_loss = masked_hard_mean(pos_values, pos_mask, hard_positive_fraction)
+            else:
+                pos_loss = masked_mean(pos_values, pos_mask)
+            if hard_negative_fraction > 0:
+                neg_loss = masked_hard_mean(neg_values, neg_mask, hard_negative_fraction)
+            else:
+                neg_loss = masked_mean(neg_values, neg_mask)
             pos_threshold = threshold + threshold_margin
             neg_threshold = threshold - threshold_margin
+            pos_threshold_values = tf.square(tf.nn.relu(pos_threshold - sim))
+            neg_threshold_values = tf.square(tf.nn.relu(sim - neg_threshold))
             threshold_loss = (
-                tf.reduce_sum(tf.square(tf.nn.relu(pos_threshold - sim)) * pos_mask)
-                / (tf.reduce_sum(pos_mask) + 1e-6)
-                + tf.reduce_sum(tf.square(tf.nn.relu(sim - neg_threshold)) * neg_mask)
-                / (tf.reduce_sum(neg_mask) + 1e-6)
+                (
+                    masked_hard_mean(pos_threshold_values, pos_mask, hard_positive_fraction)
+                    if hard_positive_fraction > 0
+                    else masked_mean(pos_threshold_values, pos_mask)
+                )
+                + (
+                    masked_hard_mean(neg_threshold_values, neg_mask, hard_negative_fraction)
+                    if hard_negative_fraction > 0
+                    else masked_mean(neg_threshold_values, neg_mask)
+                )
             )
             arcface_loss = arcface_loss_for_embeddings(tf.concat([pa, pb], axis=0), tf.concat([label_a, label_b], axis=0))
             loss = (
@@ -593,6 +627,8 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--threshold-margin", type=float, default=0.04)
     parser.add_argument("--teacher-pair-weight", type=float, default=0.0)
+    parser.add_argument("--hard-positive-fraction", type=float, default=0.0)
+    parser.add_argument("--hard-negative-fraction", type=float, default=0.0)
     parser.add_argument("--mine-hard-negatives", type=int, default=0)
     parser.add_argument("--arcface-weight", type=float, default=0.0)
     parser.add_argument("--arcface-scale", type=float, default=32.0)
@@ -663,6 +699,8 @@ def main():
         args.threshold,
         args.threshold_margin,
         args.teacher_pair_weight,
+        args.hard_positive_fraction,
+        args.hard_negative_fraction,
         id_labels,
         identity_stream_paths,
         identity_stream_labels,

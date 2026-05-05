@@ -224,6 +224,13 @@ Follow-up optimization sweep:
 - 256D experiment: `outputs/w600k_projection_256d.npz` plus `official_mobilefacenet/student_distill_w1_256d/mfn_w1_distill_256d.int8.tflite` and `official_mobilefacenet/student_distill_w1_pairft_256d_mild_a/mfn_w1_pairft_256d.int8.tflite`. Vela stays within the SRAM budget (`599.84 KiB`, NPU `100%`), but accuracy is worse than 128D: the pair-finetuned 256D model scores `0.668`, with LFW `sep=0.1343 acc=71.7%` and CFP-FP `sep=0.0455 acc=66.7%`.
 - Current selection after this sweep: keep `tpair_hn_a` for best balanced experience (`score=0.725`), use `thr_a`/`mild_a` if low-FAR behavior matters more than the balanced score, and do not continue the 256D path without changing the training recipe or backbone.
 
+Top-k hard-pair loss:
+- `train_mfn_student_pair_finetune.py` supports `--hard-positive-fraction` and `--hard-negative-fraction`. When set, positive/negative pair and threshold losses are computed from the worst-scoring fraction of each batch instead of the full pair average.
+- `official_mobilefacenet/student_distill_w1_pairft_topk_thr_a/mfn_w1_pairft_128d.int8.tflite`: continued from `thr_a` with top-k loss. This is the best low-FAR 128D variant so far: LFW TAR@FAR1 `65.8%`, LFW TAR@FAR5 `70.0%`, CFP-FP TAR@FAR5 `18.3%`; shared score `0.712`.
+- `official_mobilefacenet/student_distill_w1_pairft_topk_thr_b/mfn_w1_pairft_128d.int8.tflite`: reduced top-k pressure and increased teacher retention from `topk_thr_a`. It restores CFP-FP best-threshold accuracy to `73.3%`, but low-FAR regresses; shared score remains `0.712`.
+- `official_mobilefacenet/student_distill_w1_pairft_topk_tpair_a/mfn_w1_pairft_128d.int8.tflite`: continued from `tpair_hn_a`; it improves LFW TAR@FAR5 to `54.2%` versus `52.5%`, but drops shared score to `0.707`.
+- Conclusion: top-k loss is useful for low-FAR tuning but still does not beat `tpair_hn_a` on balanced shared-threshold score. The next meaningful accuracy jump likely needs a stronger backbone/teacher recipe or a product-like validation/training set, not more small loss-weight sweeps.
+
 Production feasibility metrics:
 - Command: `uv run python evaluate_embedding_models.py --max-pairs 120 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model thr_a=official_mobilefacenet/student_distill_w1_pairft_thr_a/mfn_w1_pairft_128d.int8.tflite --model tpair_hn=official_mobilefacenet/student_distill_w1_pairft_tpair_hn_a/mfn_w1_pairft_128d.int8.tflite`.
 - LFW verification: w600k EER `3.3%`, TAR@FAR5 `96.7%`; `thr_a` EER `20.0%`, TAR@FAR5 `67.5%`; `tpair_hn_a` EER `22.9%`, TAR@FAR5 `52.5%`.
