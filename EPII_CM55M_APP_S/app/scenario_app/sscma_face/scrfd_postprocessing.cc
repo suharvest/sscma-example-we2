@@ -46,13 +46,6 @@ static constexpr float SMOOTHING_ALPHA = 0.7f;           /* EMA smoothing factor
 static constexpr float MAX_FACE_RATIO = 0.6f;            /* Max face size as ratio of image dimension */
 
 /**
- * @brief Sigmoid activation function
- */
-static inline float sigmoid(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
-
-/**
  * @brief Dequantize INT8 value to float
  *
  * All tensors from Vela NPU are int8 quantized.
@@ -290,17 +283,17 @@ std::forward_list<scrfd_face> scrfd_detect(
                     /* Row index in the flattened 2D tensor */
                     int row_idx = (h * grid_w + w) * SCRFD_NUM_ANCHORS + a;
 
-                    /* Decode face score - score tensor is [N, 1]
-                     * Vela-compiled model outputs LOGITS (pre-sigmoid), not probabilities.
-                     * Score tensor quantization confirms this:
-                     *   stride 8: zp=127, stride 16: zp=77, stride 32: zp=127
-                     * Must apply sigmoid to convert logits to [0,1] probability. */
-                    float score_logit = dequantize(
+                    /* Decode face score - score tensor is [N, 1].
+                     * Current SCRFD PTQ/QAT TFLite models already output
+                     * probabilities in [0,1] (scale=1/256, zp=-128).
+                     * Do not apply sigmoid again, otherwise 0.87 becomes
+                     * about 0.70 and device confidence looks artificially low. */
+                    float score = dequantize(
                         branch->score_data[row_idx],
                         branch->score_scale,
                         branch->score_zp
                     );
-                    float score = sigmoid(score_logit);
+                    score = fminf(1.0f, fmaxf(0.0f, score));
 
                     /* Track max score for debugging */
                     if (score > max_score) {
