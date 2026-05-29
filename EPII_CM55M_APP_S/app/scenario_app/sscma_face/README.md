@@ -126,14 +126,14 @@ INVOKE format with `faces[]` (includes embedding, landmarks, quality):
 
 | Address | Model | Size |
 |---------|-------|------|
-| 0x200000 | SCRFD_500M_KPS | ~600 KB |
-| 0x400000 | MobileFaceNet | ~1.2 MB |
+| 0x400000 | SCRFD_500M_KPS | ~700 KB |
+| 0x510000 | MobileFaceNet distilled QAT 128D | ~1.26 MB |
 
 ## Memory Usage
 
 - SCRFD arena: 220 KB
-- MobileFaceNet arena: 700 KB
-- Total: ~1 MB (allocated from EL_ALLOC region at runtime)
+- MobileFaceNet arena: 620 KB reserved (Vela reports 599 KiB)
+- Total: ~840 KB (allocated from EL_ALLOC region at runtime)
 
 ## Building
 
