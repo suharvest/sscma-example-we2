@@ -28,12 +28,13 @@
  * Memory layout (sscma_micro scans 0x400000-0xE00000):
  *   0x00000000 - 0x00200000: Firmware (2 MB)
  *   0x00400000 - 0x004B4000: SCRFD model (717 KB)         -> ID=1
- *   0x00510000 - 0x005EA000: GhostFaceNet model (869 KB)  -> ID=2
- *   0x00600000 - 0x006B4000: (placeholder, use SCRFD)     -> ID=3
- *   0x00700000 - 0x0089B000: Swift YOLO (1.6 MB)          -> ID=4 (object detection)
+ *   0x00510000 - 0x0064C000: MobileFaceNet distilled QAT 128D  -> ID=2
+ *   0x00700000 - 0x0089B000: Swift YOLO / test input area
  */
 #define SCRFD_MODEL_FLASH_ADDR          (BASE_ADDR_FLASH1_R_ALIAS + 0x400000)
 #define MOBILEFACENET_MODEL_FLASH_ADDR  (BASE_ADDR_FLASH1_R_ALIAS + 0x510000)
+#define FACE_EMB_TEST_INPUT_FLASH_OFFSET (0x700000)
+#define FACE_EMB_TEST_INPUT_FLASH_ADDR  (BASE_ADDR_FLASH1_R_ALIAS + FACE_EMB_TEST_INPUT_FLASH_OFFSET)
 
 /* Legacy defines for backward compatibility */
 #define FACE_DETECT_FLASH_ADDR          SCRFD_MODEL_FLASH_ADDR
@@ -59,11 +60,12 @@
 /*
  * MobileFaceNet Embedding Model Configuration
  *
- * foamliu MobileFaceNet specifications:
- *   - Source: https://github.com/foamliu/MobileFaceNet
+ * distilled QAT 128D MobileFaceNet specifications:
+ *   - Source: InsightFace w600k_mbf teacher, PCA 512->128D, QAT-distilled
  *   - Input: 112x112 RGB (aligned face, normalized to [-1,1])
  *   - Output: 128-dimensional embedding (L2 normalized)
- *   - Accuracy: 99.25% LFW
+ *   - Accuracy: LFW 99.15% / CFP-FP 91.56%
+ *   - Vela: 599 KiB SRAM, ~1264 KiB flash, 100% NPU (63 ops, 0 CPU)
  *   - Inference: 100% NPU on Ethos-U55
  */
 #define EMBEDDING_INPUT_WIDTH           112
@@ -78,19 +80,75 @@
  *
  * Memory usage (from Vela 3.9.0 compilation):
  *   - SCRFD: 201 KB (Vela reports 200.81 KB)
- *   - MobileFaceNet: 600 KB (Vela reports 599.77 KB)
- *   - Total: ~820 KB
+ *   - MobileFaceNet: 620 KB reserved (Vela reports 599 KiB)
+ *   - Total: ~840 KB
  *
- * Note: TFLite Micro runtime needs ~10-20% overhead beyond Vela report.
+ * Note: 620 KB = 599 KiB Vela peak + ~3.5% TFLM/alignment margin. The smaller
+ * footprint widens the SenseCap Watcher stream-on headroom (see
+ * FACE_SAFE_RUNTIME_ARENA_BUDGET below). If AllocateTensors fails on device,
+ * bump only MOBILEFACENET_ARENA_SIZE first before changing the flashed model.
  */
 #define SCRFD_ARENA_SIZE                (220 * 1024)    /* 220 KB for face detection (Vela: 201 KB) */
-#define MOBILEFACENET_ARENA_SIZE        (1300 * 1024)    /* 1300 KB for QAT MobileFaceNet (Vela: 1176 KB) */
+#define MOBILEFACENET_ARENA_SIZE        (620 * 1024)     /* distilled QAT 128D (Vela: 599 KiB) */
 
 /* Legacy define for total reference */
 #define TENSOR_ARENA_SIZE               (SCRFD_ARENA_SIZE + MOBILEFACENET_ARENA_SIZE)
 
 /* Aligned face buffer size (112x112 RGB) */
 #define ALIGNED_FACE_BUFFER_SIZE        (112 * 112 * 3)
+
+/*
+ * 640x480 camera YUV422 DMA occupies the tail of SRAM1 from 0x3416A000.
+ * Face inference allocations start at 0x34054000, leaving 0x116000 bytes
+ * before they overlap live camera DMA memory.
+ *
+ * If the runtime arena footprint is larger than this safe budget, stop the
+ * camera stream before running SCRFD/MobileFaceNet. Keep this as a configurable
+ * policy so smaller models can run with the stream left active.
+ */
+#define FACE_SRAM_BEFORE_YUV422_BYTES       (0x116000)
+#define FACE_FIXED_IMAGE_BUFFER_SIZE        (FD_INPUT_TENSOR_WIDTH * FD_INPUT_TENSOR_HEIGHT * FD_INPUT_TENSOR_CHANNEL + ALIGNED_FACE_BUFFER_SIZE)
+#define FACE_SAFE_RUNTIME_ARENA_BUDGET      (FACE_SRAM_BEFORE_YUV422_BYTES - FACE_FIXED_IMAGE_BUFFER_SIZE)
+#define FACE_RUNTIME_ARENA_SIZE             (SCRFD_ARENA_SIZE + MOBILEFACENET_ARENA_SIZE)
+
+#ifndef FACE_STOP_STREAM_BEFORE_INFERENCE
+#define FACE_STOP_STREAM_BEFORE_INFERENCE   (FACE_RUNTIME_ARENA_SIZE > FACE_SAFE_RUNTIME_ARENA_BUDGET)
+#endif
+
+/*
+ * Optional diagnostic path for running a pre-Vela MobileFaceNet model through
+ * TFLite Micro CPU kernels on the device. Keep this disabled in production:
+ * the extra kernels exceed the Watcher/Grove Vision firmware memory budget.
+ */
+#ifndef FACE_ENABLE_EMB_CPU_OPS
+#define FACE_ENABLE_EMB_CPU_OPS             0
+#endif
+
+/*
+ * Ethos-U coherency guard for embedding inference. The production default
+ * cleans the CPU-written input and invalidates the NPU-written output only.
+ * Do not invalidate the full tensor arena before Invoke(): TFLM may have
+ * prepared dirty CPU-side arena state that the NPU still needs to read.
+ * Full-arena invalidation is kept only as a diagnostic switch.
+ */
+#ifndef FACE_CLEAN_INVALIDATE_EMB_ARENA_BEFORE_INVOKE
+#define FACE_CLEAN_INVALIDATE_EMB_ARENA_BEFORE_INVOKE 0
+#endif
+
+#ifndef FACE_INVALIDATE_EMB_ARENA_BEFORE_INVOKE
+#define FACE_INVALIDATE_EMB_ARENA_BEFORE_INVOKE 0
+#endif
+
+/* Diagnostic only: print face pipeline buffer/tensor addresses at init. */
+#ifndef FACE_DEBUG_MEMORY_LAYOUT
+#define FACE_DEBUG_MEMORY_LAYOUT        0
+#endif
+
+/* Diagnostic only: isolate cache coherency by running MobileFaceNet with
+ * D-Cache disabled around Invoke(). Keep disabled for production. */
+#ifndef FACE_DISABLE_DCACHE_FOR_EMB_INVOKE
+#define FACE_DISABLE_DCACHE_FOR_EMB_INVOKE 0
+#endif
 
 /* Face detection thresholds */
 #define FACE_CONF_THRESHOLD             0.40f   /* Confidence threshold (lowered: Vela model logits via sigmoid) */

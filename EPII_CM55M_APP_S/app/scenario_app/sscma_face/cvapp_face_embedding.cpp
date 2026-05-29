@@ -43,7 +43,11 @@
 #include "el_cv.h"
 
 #include "xprintf.h"
+#include "hx_drv_watchdog.h"
 #include "spi_master_protocol.h"
+extern "C" {
+#include "qspi_eeprom_interface.h"
+}
 #include "memory_manage.h"
 #include "porting/el_misc.h"  /* el_aligned_malloc_once */
 #include "common_config.h"
@@ -103,6 +107,7 @@ extern struct ethosu_driver _ethosu_drv;
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
+#define DCACHE_LINE_SIZE 32u
 
 using namespace std;
 
@@ -114,28 +119,25 @@ namespace {
  * Strategy: SEPARATE tensor arenas for each model, allocated as STATIC buffers
  * to avoid conflicts with sscma_micro's BSS memory region.
  *
- * Memory usage (Vela 5.0.0, shared arena):
+ * Memory usage (Vela 3.9.0):
  *   SCRFD arena:        220 KB (Vela: 201 KB)
- *   QAT MobileFaceNet arena: 1300 KB (Vela: 1176 KB)
- *   Shared arena (models run sequentially): 1300 KB max
+ *   QAT MobileFaceNet arena: 620 KB (Vela: 599 KiB)
  *   EL_ALLOC extended: 1712 KB (watcher.ld)
  */
 constexpr int scrfd_arena_size = SCRFD_ARENA_SIZE;
 constexpr int mobilefacenet_arena_size = MOBILEFACENET_ARENA_SIZE;
-constexpr int mobilefacenet_arena_head_offset = 128;  /* Safety offset to avoid arena head conflicts */
 constexpr int fd_resize_image_size = FD_INPUT_TENSOR_WIDTH * FD_INPUT_TENSOR_HEIGHT * FD_INPUT_TENSOR_CHANNEL;
 constexpr int aligned_face_buffer_size = ALIGNED_FACE_BUFFER_SIZE;
-constexpr int rgb_frame_buffer_size = 240 * 240 * 3;  /* Full frame interleaved RGB: 240x240 from sscma_micro camera */
 
 /*
  * Buffer pointers - allocated dynamically from sscma_micro's elHeap via
- * el_aligned_malloc_once(). This shares the 1112 KB EL_ALLOC region with
- * sscma_micro's tensor arenas and other allocations.
+ * el_aligned_malloc_once(). 640x480 camera DMA uses the tail of SRAM1, so
+ * fixed image buffers are kept to model input sizes only.
  *
- * Total face embedding memory: ~1.26 MB
+ * Total face embedding memory with the current QAT model: ~952 KB
  *   - SCRFD arena: 220 KB
- *   - MobileFaceNet arena: 700 KB
- *   - Image buffers: ~337 KB
+ *   - MobileFaceNet arena: 620 KB
+ *   - Image buffers: ~112 KB
  *
  * Note: If sscma_micro already uses significant elHeap memory (e.g., for YOLO),
  * face embedding init may fail due to insufficient memory.
@@ -144,7 +146,6 @@ static uint32_t scrfd_tensor_arena = 0;
 static uint32_t mobilefacenet_tensor_arena = 0;
 static uint32_t fd_resized_img = 0;
 static uint32_t aligned_face_img = 0;
-static uint32_t rgb_frame_buffer = 0;  /* Buffer for interleaved RGB (from planar BGR) */
 
 /* Scale factors for coordinate mapping (model space -> original image space) */
 static float scale_w = 1.0f;
@@ -172,22 +173,254 @@ TfLiteTensor *fd_kps_tensors[SCRFD_NUM_STRIDES];
 tflite::MicroInterpreter *emb_int_ptr = nullptr;
 TfLiteTensor *emb_input = nullptr;
 TfLiteTensor *emb_output = nullptr;
+static uint8_t *emb_input_data = nullptr;
+static uint8_t *emb_output_data = nullptr;
+static uint32_t emb_input_bytes = 0;
+static uint32_t emb_output_bytes = 0;
+static int32_t emb_input_type = 0;
+static int32_t emb_output_type = 0;
+static int32_t emb_input_zp = 0;
+static int32_t emb_output_zp = 0;
+static float emb_input_scale = 0.0f;
+static float emb_output_scale = 0.0f;
+static int32_t emb_input_dims[4] = {};
+static int32_t emb_output_dims[4] = {};
+static int32_t emb_input_dims_count = 0;
+static int32_t emb_output_dims_count = 0;
 
 /* SCRFD network configuration */
 scrfd_network scrfd_net;
 
 static uint32_t g_face_emb_init = 0;
+static face_debug_tensors_t g_last_debug_tensors = {};
+static float g_face_conf_threshold = FACE_CONF_THRESHOLD;
+
+static inline void face_runtime_keepalive(void)
+{
+#if defined(WATCH_DOG_TIMEOUT_TH) && defined(WATCHDOG_ID_0)
+    hx_drv_watchdog_update(WATCHDOG_ID_0, WATCH_DOG_TIMEOUT_TH);
+#endif
+#if defined(WATCH_DOG_TIMEOUT_TH) && defined(WATCHDOG_ID_1)
+    hx_drv_watchdog_update(WATCHDOG_ID_1, WATCH_DOG_TIMEOUT_TH);
+#endif
+}
+
+static inline uint8_t clip_u8(int32_t v)
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+static inline void cache_range_align(const void *addr, uint32_t bytes,
+                                     uint32_t **aligned_addr, int32_t *aligned_bytes)
+{
+    uintptr_t start = (uintptr_t)addr;
+    uintptr_t end = start + (uintptr_t)bytes;
+    start &= ~(uintptr_t)(DCACHE_LINE_SIZE - 1u);
+    end = (end + (uintptr_t)(DCACHE_LINE_SIZE - 1u)) & ~(uintptr_t)(DCACHE_LINE_SIZE - 1u);
+    *aligned_addr = (uint32_t *)start;
+    *aligned_bytes = (int32_t)(end - start);
+}
+
+static inline void clean_dcache_range(const void *addr, uint32_t bytes)
+{
+    if (!addr || bytes == 0) return;
+    uint32_t *aligned_addr = nullptr;
+    int32_t aligned_bytes = 0;
+    cache_range_align(addr, bytes, &aligned_addr, &aligned_bytes);
+    SCB_CleanDCache_by_Addr(aligned_addr, aligned_bytes);
+}
+
+static inline void invalidate_dcache_range(const void *addr, uint32_t bytes)
+{
+    if (!addr || bytes == 0) return;
+    uint32_t *aligned_addr = nullptr;
+    int32_t aligned_bytes = 0;
+    cache_range_align(addr, bytes, &aligned_addr, &aligned_bytes);
+    SCB_InvalidateDCache_by_Addr(aligned_addr, aligned_bytes);
+}
+
+static inline void clean_invalidate_dcache_range(const void *addr, uint32_t bytes)
+{
+    if (!addr || bytes == 0) return;
+    uint32_t *aligned_addr = nullptr;
+    int32_t aligned_bytes = 0;
+    cache_range_align(addr, bytes, &aligned_addr, &aligned_bytes);
+    SCB_CleanInvalidateDCache_by_Addr(aligned_addr, aligned_bytes);
+}
+
+static void update_embedding_debug_tensors()
+{
+    memset(&g_last_debug_tensors, 0, sizeof(g_last_debug_tensors));
+    g_last_debug_tensors.valid = 1;
+    g_last_debug_tensors.emb_input_data = (const uint8_t*)emb_input_data;
+    g_last_debug_tensors.emb_input_bytes = emb_input_bytes;
+    g_last_debug_tensors.emb_input_type = emb_input_type;
+    g_last_debug_tensors.emb_input_zp = emb_input_zp;
+    g_last_debug_tensors.emb_input_scale = emb_input_scale;
+    g_last_debug_tensors.emb_input_dims_count = emb_input_dims_count;
+    for (int i = 0; i < g_last_debug_tensors.emb_input_dims_count; i++) {
+        g_last_debug_tensors.emb_input_dims[i] = emb_input_dims[i];
+    }
+    g_last_debug_tensors.emb_output_data = (const uint8_t*)emb_output_data;
+    g_last_debug_tensors.emb_output_bytes = emb_output_bytes;
+    g_last_debug_tensors.emb_output_type = emb_output_type;
+    g_last_debug_tensors.emb_output_zp = emb_output_zp;
+    g_last_debug_tensors.emb_output_scale = emb_output_scale;
+    g_last_debug_tensors.emb_output_dims_count = emb_output_dims_count;
+    for (int i = 0; i < g_last_debug_tensors.emb_output_dims_count; i++) {
+        g_last_debug_tensors.emb_output_dims[i] = emb_output_dims[i];
+    }
+}
+
+static TfLiteStatus invoke_mobilefacenet_from_current_input()
+{
+#if FACE_CLEAN_INVALIDATE_EMB_ARENA_BEFORE_INVOKE
+    clean_invalidate_dcache_range((void *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
+#else
+    clean_dcache_range(emb_input_data, emb_input_bytes);
+#if FACE_INVALIDATE_EMB_ARENA_BEFORE_INVOKE
+    __DSB();
+    __ISB();
+    invalidate_dcache_range((void *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
+#else
+    invalidate_dcache_range(emb_output_data, emb_output_bytes);
+#endif
+#endif
+    __DSB();
+    __ISB();
+
+#if FACE_DISABLE_DCACHE_FOR_EMB_INVOKE
+    SCB_CleanInvalidateDCache();
+    __DSB();
+    __ISB();
+    SCB_DisableDCache();
+#endif
+    TfLiteStatus invoke_status = emb_int_ptr->Invoke();
+#if FACE_DISABLE_DCACHE_FOR_EMB_INVOKE
+    SCB_EnableDCache();
+    SCB_CleanInvalidateDCache();
+    __DSB();
+    __ISB();
+#endif
+    if (invoke_status == kTfLiteOk) {
+        invalidate_dcache_range(emb_output_data, emb_output_bytes);
+        update_embedding_debug_tensors();
+    }
+    return invoke_status;
+}
+
+static inline int8_t quantize_embedding_pixel(uint8_t pixel)
+{
+    if (emb_input_zp == -1 && fabsf(emb_input_scale - (1.0f / 127.5f)) < 0.00001f) {
+        int val = pixel > 128 ? (int)pixel - 128 : (int)pixel - 129;
+        if (val < -128) val = -128;
+        if (val > 127) val = 127;
+        return (int8_t)val;
+    }
+
+    if (emb_input_scale <= 0.0f) {
+        int val = (int)pixel - 128;
+        if (val < -128) val = -128;
+        if (val > 127) val = 127;
+        return (int8_t)val;
+    }
+
+    float normalized = ((float)pixel / 127.5f) - 1.0f;
+    int val = (int)roundf((normalized / emb_input_scale) + (float)emb_input_zp);
+    if (val < -128) val = -128;
+    if (val > 127) val = 127;
+    return (int8_t)val;
+}
+
+static void quantize_embedding_input_rgb(const uint8_t *src, int8_t *dst, int size)
+{
+    for (int i = 0; i < size; i++) {
+        dst[i] = quantize_embedding_pixel(src[i]);
+    }
+}
+
+static inline void yuv422p_get_rgb(const uint8_t *yuv, int w, int h, int x, int y,
+                                   uint8_t *r_out, uint8_t *g_out, uint8_t *b_out)
+{
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= w) x = w - 1;
+    if (y >= h) y = h - 1;
+
+    uint32_t init_index = (uint32_t)y * (uint32_t)w + (uint32_t)x;
+    uint32_t cbcr_index = init_index - (init_index & 1u);
+    uint32_t u_chunk = (uint32_t)w * (uint32_t)h;
+    uint32_t v_chunk = u_chunk + (u_chunk >> 1);
+
+    int32_t yy = yuv[init_index];
+    int32_t cb = yuv[u_chunk + cbcr_index / 2] - 128;
+    int32_t cr = yuv[v_chunk + cbcr_index / 2] - 128;
+
+    int32_t r = yy + (14065 * cr) / 10000;
+    int32_t g = yy - (3455 * cb) / 10000 - (7169 * cr) / 10000;
+    int32_t b = yy + (17790 * cb) / 10000;
+
+    *r_out = clip_u8(r);
+    *g_out = clip_u8(g);
+    *b_out = clip_u8(b);
+}
+
+static void apply_face_alignment_yuv422p(const uint8_t *src_yuv, int src_w, int src_h,
+                                         uint8_t *dst_rgb, const affine_transform_t *transform)
+{
+    affine_transform_t inv_transform;
+    invert_affine_transform(transform, &inv_transform);
+
+    for (int dy = 0; dy < EMBEDDING_INPUT_HEIGHT; dy++) {
+        if ((dy & 0x0f) == 0) {
+            face_runtime_keepalive();
+        }
+        for (int dx = 0; dx < EMBEDDING_INPUT_WIDTH; dx++) {
+            float sx = inv_transform.m[0] * dx + inv_transform.m[1] * dy + inv_transform.m[2];
+            float sy = inv_transform.m[3] * dx + inv_transform.m[4] * dy + inv_transform.m[5];
+            int ix = (int)floorf(sx);
+            int iy = (int)floorf(sy);
+            int dst_idx = (dy * EMBEDDING_INPUT_WIDTH + dx) * 3;
+
+            if (ix >= 0 && ix < src_w - 1 && iy >= 0 && iy < src_h - 1) {
+                float fx = sx - ix;
+                float fy = sy - iy;
+                float w00 = (1.0f - fx) * (1.0f - fy);
+                float w01 = fx * (1.0f - fy);
+                float w10 = (1.0f - fx) * fy;
+                float w11 = fx * fy;
+                uint8_t r00, g00, b00, r01, g01, b01, r10, g10, b10, r11, g11, b11;
+                yuv422p_get_rgb(src_yuv, src_w, src_h, ix,     iy,     &r00, &g00, &b00);
+                yuv422p_get_rgb(src_yuv, src_w, src_h, ix + 1, iy,     &r01, &g01, &b01);
+                yuv422p_get_rgb(src_yuv, src_w, src_h, ix,     iy + 1, &r10, &g10, &b10);
+                yuv422p_get_rgb(src_yuv, src_w, src_h, ix + 1, iy + 1, &r11, &g11, &b11);
+
+                dst_rgb[dst_idx]     = (uint8_t)(w00 * r00 + w01 * r01 + w10 * r10 + w11 * r11 + 0.5f);
+                dst_rgb[dst_idx + 1] = (uint8_t)(w00 * g00 + w01 * g01 + w10 * g10 + w11 * g11 + 0.5f);
+                dst_rgb[dst_idx + 2] = (uint8_t)(w00 * b00 + w01 * b01 + w10 * b10 + w11 * b11 + 0.5f);
+            } else {
+                dst_rgb[dst_idx] = 0;
+                dst_rgb[dst_idx + 1] = 0;
+                dst_rgb[dst_idx + 2] = 0;
+            }
+        }
+    }
+}
 
 /*
  * Operator resolver
  *
- * Vela compiles most ops to NPU:
- *   - SCRFD: 100% NPU
- *   - MobileFaceNet: NPU + L2_NORMALIZATION (CPU fallback)
- *
- * L2_NORMALIZATION is not supported by Ethos-U, requires CPU fallback.
+ * Production uses Vela models with the Ethos-U custom op. The optional CPU
+ * kernels are only for backend-equivalence diagnostics and are too large for
+ * the default Watcher/Grove Vision firmware memory budget.
  */
-static tflite::MicroMutableOpResolver<2> op_resolver;  /* EthosU + L2Norm */
+#if FACE_ENABLE_EMB_CPU_OPS
+static tflite::MicroMutableOpResolver<8> op_resolver;
+#else
+static tflite::MicroMutableOpResolver<1> op_resolver;
+#endif
 
 }  // namespace
 
@@ -211,6 +444,10 @@ static tflite::MicroMutableOpResolver<2> op_resolver;  /* EthosU + L2Norm */
 int cv_face_embedding_init(bool security_enable, bool privilege_enable,
                            uint32_t fd_model_addr, uint32_t embedding_model_addr)
 {
+    if (g_face_emb_init) {
+        return 0;
+    }
+
     xprintf("Face Embedding Init...\n");
 
     /*
@@ -219,28 +456,23 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * This is safe because face mode doesn't use sscma_micro's standard model.
      */
     el_aligned_malloc_reset();
-    /* Shared arena: models run sequentially, share the same memory (like tflm_fd_fm) */
-    int shared_arena_size = (scrfd_arena_size > mobilefacenet_arena_size + mobilefacenet_arena_head_offset)
-                            ? scrfd_arena_size
-                            : mobilefacenet_arena_size + mobilefacenet_arena_head_offset;
-    void* shared_arena = el_aligned_malloc_once(32, shared_arena_size);
+    void* fd_arena = el_aligned_malloc_once(32, scrfd_arena_size);
+    void* emb_arena = el_aligned_malloc_once(32, mobilefacenet_arena_size);
     void* buf1 = el_aligned_malloc_once(32, fd_resize_image_size);
     void* buf2 = el_aligned_malloc_once(32, aligned_face_buffer_size);
-    void* buf3 = el_aligned_malloc_once(32, rgb_frame_buffer_size);
 
-    if (!shared_arena || !buf1 || !buf2 || !buf3) {
+    if (!fd_arena || !emb_arena || !buf1 || !buf2) {
         xprintf("ERROR: Face buffer allocation failed!\n");
-        xprintf("  Need: shared=%d, resize=%d, align=%d, rgb=%d\n",
-                shared_arena_size, fd_resize_image_size,
-                aligned_face_buffer_size, rgb_frame_buffer_size);
+        xprintf("  Need: fd=%d, emb=%d, resize=%d, align=%d\n",
+                scrfd_arena_size, mobilefacenet_arena_size, fd_resize_image_size,
+                aligned_face_buffer_size);
         return -30;
     }
 
-    scrfd_tensor_arena = (uint32_t)shared_arena;
-    mobilefacenet_tensor_arena = (uint32_t)((uint8_t*)shared_arena + mobilefacenet_arena_head_offset);
+    scrfd_tensor_arena = (uint32_t)fd_arena;
+    mobilefacenet_tensor_arena = (uint32_t)emb_arena;
     fd_resized_img = (uint32_t)buf1;
     aligned_face_img = (uint32_t)buf2;
-    rgb_frame_buffer = (uint32_t)buf3;
 
     xprintf("Face buffers allocated from elHeap\n");
 
@@ -282,10 +514,36 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
             xprintf("ERROR: Failed to add Ethos-U\n");
             return -4;
         }
-        if (kTfLiteOk != op_resolver.AddL2Normalization()) {
-            xprintf("ERROR: Failed to add L2Normalization\n");
+#if FACE_ENABLE_EMB_CPU_OPS
+        if (kTfLiteOk != op_resolver.AddPad()) {
+            xprintf("ERROR: Failed to add PAD\n");
             return -5;
         }
+        if (kTfLiteOk != op_resolver.AddConv2D()) {
+            xprintf("ERROR: Failed to add CONV_2D\n");
+            return -6;
+        }
+        if (kTfLiteOk != op_resolver.AddDepthwiseConv2D()) {
+            xprintf("ERROR: Failed to add DEPTHWISE_CONV_2D\n");
+            return -7;
+        }
+        if (kTfLiteOk != op_resolver.AddAdd()) {
+            xprintf("ERROR: Failed to add ADD\n");
+            return -8;
+        }
+        if (kTfLiteOk != op_resolver.AddReshape()) {
+            xprintf("ERROR: Failed to add RESHAPE\n");
+            return -9;
+        }
+        if (kTfLiteOk != op_resolver.AddPack()) {
+            xprintf("ERROR: Failed to add PACK\n");
+            return -12;
+        }
+        if (kTfLiteOk != op_resolver.AddStridedSlice()) {
+            xprintf("ERROR: Failed to add STRIDED_SLICE\n");
+            return -13;
+        }
+#endif
     }
 
     /* Create interpreters */
@@ -327,7 +585,6 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         xprintf("ERROR: MobileFaceNet tensor allocation failed\n");
         return -27;
     }
-
     /* Setup SCRFD interpreter */
     fd_int_ptr = &fd_static_interpreter;
     fd_input = fd_static_interpreter.input(0);
@@ -428,12 +685,42 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
     scrfd_net = scrfd_init(
         fd_score_tensors, fd_bbox_tensors, fd_kps_tensors,
         FD_INPUT_TENSOR_WIDTH, FD_INPUT_TENSOR_HEIGHT,
-        FACE_CONF_THRESHOLD, FACE_NMS_THRESHOLD);
+        g_face_conf_threshold, FACE_NMS_THRESHOLD);
 
     /* Setup MobileFaceNet interpreter */
     emb_int_ptr = &emb_static_interpreter;
     emb_input = emb_static_interpreter.input(0);
     emb_output = emb_static_interpreter.output(0);
+    emb_input_data = emb_input ? (uint8_t *)emb_input->data.data : nullptr;
+    emb_output_data = emb_output ? (uint8_t *)emb_output->data.data : nullptr;
+    emb_input_bytes = emb_input ? emb_input->bytes : 0;
+    emb_output_bytes = emb_output ? emb_output->bytes : 0;
+    emb_input_type = emb_input ? emb_input->type : 0;
+    emb_output_type = emb_output ? emb_output->type : 0;
+    emb_input_zp = emb_input ? emb_input->params.zero_point : 0;
+    emb_output_zp = emb_output ? emb_output->params.zero_point : 0;
+    emb_input_scale = emb_input ? emb_input->params.scale : 0.0f;
+    emb_output_scale = emb_output ? emb_output->params.scale : 0.0f;
+    emb_input_dims_count = emb_input ? MIN(emb_input->dims->size, 4) : 0;
+    for (int i = 0; i < emb_input_dims_count; i++) {
+        emb_input_dims[i] = emb_input->dims->data[i];
+    }
+    emb_output_dims_count = emb_output ? MIN(emb_output->dims->size, 4) : 0;
+    for (int i = 0; i < emb_output_dims_count; i++) {
+        emb_output_dims[i] = emb_output->dims->data[i];
+    }
+
+#if FACE_DEBUG_MEMORY_LAYOUT
+    xprintf("[FACE-MEM] fd_arena=0x%08X size=%d emb_arena=0x%08X size=%d\n",
+            scrfd_tensor_arena, scrfd_arena_size,
+            mobilefacenet_tensor_arena, mobilefacenet_arena_size);
+    xprintf("[FACE-MEM] fd_resize=0x%08X size=%d align=0x%08X size=%d\n",
+            fd_resized_img, fd_resize_image_size,
+            aligned_face_img, aligned_face_buffer_size);
+    xprintf("[FACE-MEM] emb_input=0x%08X bytes=%u emb_output=0x%08X bytes=%u\n",
+            (uint32_t)emb_input_data, emb_input_bytes,
+            (uint32_t)emb_output_data, emb_output_bytes);
+#endif
 
     /* No camera reconfiguration needed.
      * We use sscma_micro's existing YUV422 camera pipeline directly.
@@ -475,7 +762,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     /* CRITICAL: Invalidate D-Cache for DMA-written camera buffer (defensive).
      * face_invoke.hpp also invalidates, but double-invalidation is harmless. */
     uint32_t yuv_frame_size = img_w * img_h * 2;  /* YUV422P: 2 bytes/pixel */
-    SCB_InvalidateDCache_by_Addr((uint32_t*)frame_data, yuv_frame_size);
+    invalidate_dcache_range(frame_data, yuv_frame_size);
 
     /* Convert YUV422P → RGB888 at SCRFD input size (160x160) using el_img_convert.
      * el_img_convert does resize + YUV→RGB in one pass (nearest-neighbor). */
@@ -499,28 +786,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         edgelab::el_img_convert(&src_img, &dst_img);
     }
 
-    /* Also convert full-size for face alignment later */
-    {
-        el_img_t src_img = {};
-        src_img.data = frame_data;
-        src_img.size = img_w * img_h * 2;
-        src_img.width = (uint16_t)img_w;
-        src_img.height = (uint16_t)img_h;
-        src_img.format = EL_PIXEL_FORMAT_YUV422;
-        src_img.rotate = EL_PIXEL_ROTATE_0;
-
-        el_img_t dst_img = {};
-        dst_img.data = (uint8_t *)rgb_frame_buffer;
-        dst_img.size = img_w * img_h * 3;
-        dst_img.width = (uint16_t)img_w;
-        dst_img.height = (uint16_t)img_h;
-        dst_img.format = EL_PIXEL_FORMAT_RGB888;
-        dst_img.rotate = EL_PIXEL_ROTATE_0;
-
-        edgelab::el_img_convert(&src_img, &dst_img);
-    }
-
-    DBG_VERBOSE("  YUV422P %dx%d → RGB888 converted\n", img_w, img_h);
+    DBG_VERBOSE("  YUV422P %dx%d -> SCRFD RGB888 converted\n", img_w, img_h);
 
     /* DEBUG: Check converted data for first 3 frames */
     if (frame_count <= 3) {
@@ -620,9 +886,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     DBG_VERBOSE("  Step 2: Running SCRFD inference...\n");
 
     /* D-Cache Coherency Fix - CRITICAL for NPU */
-    if (fd_input->data.data) {
-        SCB_CleanDCache_by_Addr((uint32_t*)fd_input->data.data, fd_input->bytes);
-    }
+    clean_dcache_range(fd_input->data.data, fd_input->bytes);
     
     invoke_status = fd_int_ptr->Invoke();
     if (invoke_status != kTfLiteOk) {
@@ -636,16 +900,16 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
      */
     for (int i = 0; i < SCRFD_NUM_STRIDES; i++) {
         if (fd_score_tensors[i] && fd_score_tensors[i]->data.data) {
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_score_tensors[i]->data.data,
-                                         fd_score_tensors[i]->bytes);
+            invalidate_dcache_range(fd_score_tensors[i]->data.data,
+                                    fd_score_tensors[i]->bytes);
         }
         if (fd_bbox_tensors[i] && fd_bbox_tensors[i]->data.data) {
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_bbox_tensors[i]->data.data,
-                                         fd_bbox_tensors[i]->bytes);
+            invalidate_dcache_range(fd_bbox_tensors[i]->data.data,
+                                    fd_bbox_tensors[i]->bytes);
         }
         if (fd_kps_tensors[i] && fd_kps_tensors[i]->data.data) {
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_kps_tensors[i]->data.data,
-                                         fd_kps_tensors[i]->bytes);
+            invalidate_dcache_range(fd_kps_tensors[i]->data.data,
+                                    fd_kps_tensors[i]->bytes);
         }
     }
 
@@ -667,12 +931,13 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
                     if (data[j] > zp) cnt_above_zp++;
                     sum += data[j];
                 }
-                /* Compute max dequantized logit and sigmoid score */
-                float max_logit = (float)(vmax - zp) * sc;
-                float max_sigmoid = 1.0f / (1.0f + expf(-max_logit));
-                DBG_INFO("[DBG] Score[%d]: zp=%d sc=%d/1e6 range=[%d,%d] avg=%d above_zp=%d/%d logit=%d sig=%d/1000\n",
+                /* Score heads already output probabilities, not logits. */
+                float max_score = (float)(vmax - zp) * sc;
+                if (max_score < 0.0f) max_score = 0.0f;
+                if (max_score > 1.0f) max_score = 1.0f;
+                DBG_INFO("[DBG] Score[%d]: zp=%d sc=%d/1e6 range=[%d,%d] avg=%d above_zp=%d/%d score=%d/1000\n",
                         i, zp, (int)(sc * 1000000), (int)vmin, (int)vmax,
-                        (int)(sum / sz), cnt_above_zp, sz, (int)(max_logit * 1000), (int)(max_sigmoid * 1000));
+                        (int)(sum / sz), cnt_above_zp, sz, (int)(max_score * 1000));
             }
         }
         /* Also dump bbox tensor stats for stride 16 to check if model is doing anything meaningful */
@@ -725,6 +990,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     }
 
     if (num_faces == 0) {
+        scrfd_free_dets(faces);
         return 0;
     }
 
@@ -839,30 +1105,21 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
 
 #if ENABLE_FACE_ALIGNMENT
     /* ===== STEP 4: Face Alignment ===== */
-    /* rgb_frame_buffer already has full-size RGB888 from el_img_convert in STEP 0.
-     * apply_face_alignment expects interleaved RGB input. */
     affine_transform_t align_transform;
     compute_face_alignment(best_face->landmarks, &align_transform);
+    apply_face_alignment_yuv422p(frame_data, img_w, img_h,
+                                 (uint8_t *)aligned_face_img,
+                                 &align_transform);
 
-    apply_face_alignment(
-        (uint8_t *)rgb_frame_buffer, img_w, img_h,
-        (uint8_t *)aligned_face_img,
-        &align_transform);
-
-    /* Copy to embedding input tensor - QAT model (zp=-1, scale=1/127.5):
-     * q = round(pixel - 128.5) => pixel - 129 with int8 clamp */
-    if (emb_input->type == kTfLiteInt8) {
+    /* Copy to embedding input tensor using the model's quantization params.
+     * Real input convention is ArcFace/MobileFaceNet RGB normalized to [-1, 1]. */
+    if (emb_input_type == kTfLiteInt8) {
         uint8_t *src = (uint8_t *)aligned_face_img;
-        int8_t *dst = emb_input->data.int8;
-        for (int i = 0; i < aligned_face_buffer_size; i++) {
-            int val = src[i] > 128 ? (int)src[i] - 128 : (int)src[i] - 129;
-            if (val < -128) val = -128;
-            if (val > 127) val = 127;
-            dst[i] = (int8_t)val;
-        }
+        int8_t *dst = (int8_t *)emb_input_data;
+        quantize_embedding_input_rgb(src, dst, aligned_face_buffer_size);
         DBG_VERBOSE("  Embedding input ready (INT8, aligned)\n");
     } else {
-        memcpy(emb_input->data.uint8, (uint8_t *)aligned_face_img, aligned_face_buffer_size);
+        memcpy(emb_input_data, (uint8_t *)aligned_face_img, aligned_face_buffer_size);
         DBG_VERBOSE("  Embedding input ready (UINT8, aligned)\n");
     }
 #else
@@ -890,20 +1147,15 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         edgelab::el_img_convert(&src_img, &dst_img);
     }
 
-    /* Copy to embedding input tensor - QAT model (zp=-1, scale=1/127.5):
-     * q = round(pixel - 128.5) => pixel - 129 with int8 clamp */
-    if (emb_input->type == kTfLiteInt8) {
+    /* Copy to embedding input tensor using the model's quantization params.
+     * Real input convention is ArcFace/MobileFaceNet RGB normalized to [-1, 1]. */
+    if (emb_input_type == kTfLiteInt8) {
         uint8_t *src = (uint8_t *)aligned_face_img;
-        int8_t *dst = emb_input->data.int8;
-        for (int i = 0; i < aligned_face_buffer_size; i++) {
-            int val = src[i] > 128 ? (int)src[i] - 128 : (int)src[i] - 129;
-            if (val < -128) val = -128;
-            if (val > 127) val = 127;
-            dst[i] = (int8_t)val;
-        }
+        int8_t *dst = (int8_t *)emb_input_data;
+        quantize_embedding_input_rgb(src, dst, aligned_face_buffer_size);
         DBG_VERBOSE("  Embedding input ready (INT8)\n");
     } else {
-        memcpy(emb_input->data.uint8, (uint8_t *)aligned_face_img, aligned_face_buffer_size);
+        memcpy(emb_input_data, (uint8_t *)aligned_face_img, aligned_face_buffer_size);
         DBG_VERBOSE("  Embedding input ready (UINT8)\n");
     }
 #endif
@@ -917,14 +1169,8 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     /* ===== STEP 5: Run MobileFaceNet Embedding ===== */
     DBG_VERBOSE("  Step 5: Running MobileFaceNet...\n");
 
-    /* D-Cache Coherency Fix */
-    SCB_CleanDCache_by_Addr((uint32_t*)emb_input->data.data, emb_input->bytes);
-    SCB_CleanDCache_by_Addr((uint32_t*)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
-    __DSB();
-    __ISB();
-
     /* Run embedding inference */
-    invoke_status = emb_int_ptr->Invoke();
+    invoke_status = invoke_mobilefacenet_from_current_input();
     if (invoke_status != kTfLiteOk) {
         xprintf("ERROR: MobileFaceNet invoke failed\n");
         scrfd_free_dets(faces);
@@ -938,22 +1184,25 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
 #endif
 
     /* ===== STEP 6: Extract Embedding ===== */
-    int emb_dim = MIN(emb_output->dims->data[1], EMBEDDING_OUTPUT_DIM);
-    DBG_VERBOSE("  Extracting embedding: type=%d, dim=%d\n", emb_output->type, emb_dim);
+    int emb_dim = EMBEDDING_OUTPUT_DIM;
+    if (emb_output_dims_count >= 2 && emb_output_dims[1] > 0) {
+        emb_dim = MIN(emb_output_dims[1], EMBEDDING_OUTPUT_DIM);
+    }
+    DBG_VERBOSE("  Extracting embedding: type=%d, dim=%d\n", emb_output_type, emb_dim);
 
-    if (emb_output->type == kTfLiteFloat32) {
-        memcpy(embedding_msg->embedding, emb_output->data.f, emb_dim * sizeof(float));
-    } else if (emb_output->type == kTfLiteInt8) {
-        float scale = emb_output->params.scale;
-        int32_t zero_point = emb_output->params.zero_point;
-        int8_t *quant_data = emb_output->data.int8;
+    if (emb_output_type == kTfLiteFloat32) {
+        memcpy(embedding_msg->embedding, emb_output_data, emb_dim * sizeof(float));
+    } else if (emb_output_type == kTfLiteInt8) {
+        float scale = emb_output_scale;
+        int32_t zero_point = emb_output_zp;
+        int8_t *quant_data = (int8_t *)emb_output_data;
         for (int i = 0; i < emb_dim; i++) {
             embedding_msg->embedding[i] = (quant_data[i] - zero_point) * scale;
         }
-    } else if (emb_output->type == kTfLiteUInt8) {
-        float scale = emb_output->params.scale;
-        int32_t zero_point = emb_output->params.zero_point;
-        uint8_t *quant_data = emb_output->data.uint8;
+    } else if (emb_output_type == kTfLiteUInt8) {
+        float scale = emb_output_scale;
+        int32_t zero_point = emb_output_zp;
+        uint8_t *quant_data = emb_output_data;
         for (int i = 0; i < emb_dim; i++) {
             embedding_msg->embedding[i] = (quant_data[i] - zero_point) * scale;
         }
@@ -1025,7 +1274,7 @@ int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t fram
     uint32_t img_h = frame_height;
 
     /* STEP 0: Convert YUV422P → RGB for SCRFD */
-    SCB_InvalidateDCache_by_Addr((uint32_t*)frame_data, img_w * img_h * 2);
+    invalidate_dcache_range(frame_data, img_w * img_h * 2);
 
     el_img_t src_img = {};
     src_img.data = frame_data;
@@ -1062,9 +1311,7 @@ int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t fram
     }
 
     /* STEP 2: Run SCRFD */
-    if (fd_input->data.data) {
-        SCB_CleanDCache_by_Addr((uint32_t*)fd_input->data.data, fd_input->bytes);
-    }
+    clean_dcache_range(fd_input->data.data, fd_input->bytes);
 
     TfLiteStatus invoke_status = fd_int_ptr->Invoke();
     if (invoke_status != kTfLiteOk) return -1;
@@ -1072,11 +1319,11 @@ int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t fram
     /* Invalidate D-Cache for SCRFD outputs */
     for (int i = 0; i < SCRFD_NUM_STRIDES; i++) {
         if (fd_score_tensors[i] && fd_score_tensors[i]->data.data)
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_score_tensors[i]->data.data, fd_score_tensors[i]->bytes);
+            invalidate_dcache_range(fd_score_tensors[i]->data.data, fd_score_tensors[i]->bytes);
         if (fd_bbox_tensors[i] && fd_bbox_tensors[i]->data.data)
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_bbox_tensors[i]->data.data, fd_bbox_tensors[i]->bytes);
+            invalidate_dcache_range(fd_bbox_tensors[i]->data.data, fd_bbox_tensors[i]->bytes);
         if (fd_kps_tensors[i] && fd_kps_tensors[i]->data.data)
-            SCB_InvalidateDCache_by_Addr((uint32_t*)fd_kps_tensors[i]->data.data, fd_kps_tensors[i]->bytes);
+            invalidate_dcache_range(fd_kps_tensors[i]->data.data, fd_kps_tensors[i]->bytes);
     }
 
     /* STEP 3: Post-processing */
@@ -1090,6 +1337,7 @@ int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t fram
     auto faces = scrfd_detect(&scrfd_net, (int)img_w, (int)img_h, &num_faces);
 
     if (num_faces <= 0) {
+        scrfd_free_dets(faces);
         alg_result->num_tracked_human_targets = 0;
         return 0;
     }
@@ -1117,5 +1365,72 @@ int cv_face_embedding_deinit()
 {
     /* No camera cleanup needed — sscma_micro owns the camera pipeline */
     xprintf("Face embedding deinitialized\n");
+    return 0;
+}
+
+int cv_face_embedding_get_debug_tensors(face_debug_tensors_t *out)
+{
+    if (out == nullptr) return -1;
+    if (!g_last_debug_tensors.valid) return -2;
+    *out = g_last_debug_tensors;
+    return 0;
+}
+
+int cv_face_embedding_run_fixed_input_test(uint32_t seed)
+{
+    if (g_face_emb_init == 0 || emb_int_ptr == nullptr || emb_input_data == nullptr) {
+        return -1;
+    }
+
+    if (emb_input_type == kTfLiteInt8) {
+        int8_t *dst = (int8_t *)emb_input_data;
+        for (uint32_t i = 0; i < emb_input_bytes; i++) {
+            uint32_t v = (i * 73u + seed * 29u + (i >> 3)) & 0xFFu;
+            dst[i] = (int8_t)((int32_t)v - 128);
+        }
+    } else {
+        for (uint32_t i = 0; i < emb_input_bytes; i++) {
+            emb_input_data[i] = (uint8_t)((i * 73u + seed * 29u + (i >> 3)) & 0xFFu);
+        }
+    }
+
+    TfLiteStatus status = invoke_mobilefacenet_from_current_input();
+    return status == kTfLiteOk ? 0 : -2;
+}
+
+int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t input_bytes)
+{
+    if (g_face_emb_init == 0 || emb_int_ptr == nullptr || emb_input_data == nullptr) {
+        return -1;
+    }
+    if (input_bytes == 0 || input_bytes != emb_input_bytes) {
+        input_bytes = emb_input_bytes;
+    }
+    if (input_bytes == 0) {
+        return -3;
+    }
+
+    uint32_t flash_offset = input_flash_addr;
+    if (flash_offset >= BASE_ADDR_FLASH1_R_ALIAS) {
+        flash_offset -= BASE_ADDR_FLASH1_R_ALIAS;
+    }
+    int read_ret = hx_lib_qspi_eeprom_4read(flash_offset, emb_input_data, input_bytes);
+    if (read_ret != 0) {
+        memcpy(emb_input_data, (const void *)input_flash_addr, input_bytes);
+    }
+    TfLiteStatus status = invoke_mobilefacenet_from_current_input();
+    return status == kTfLiteOk ? 0 : -2;
+}
+
+int cv_face_embedding_set_conf_threshold(float threshold)
+{
+    if (threshold < 0.01f || threshold > 1.0f) {
+        threshold = FACE_CONF_THRESHOLD;
+    }
+    g_face_conf_threshold = threshold;
+    if (g_face_emb_init) {
+        scrfd_net.score_thresh = threshold;
+    }
+    xprintf("Face confidence threshold set to %d/1000\n", (int)(threshold * 1000.0f));
     return 0;
 }

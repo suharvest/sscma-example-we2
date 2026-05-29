@@ -187,6 +187,7 @@ SECTIONS
         . = ALIGN(4);
         PROVIDE (__persistent_start = .);
 
+        LONG(0);
         *(.persistent .persistent.* .gnu.linkonce.p.*)
 
         PROVIDE (__persistent_end = .);

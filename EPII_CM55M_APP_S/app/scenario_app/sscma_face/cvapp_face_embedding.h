@@ -51,6 +51,55 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
 int cv_face_detect_only(uint8_t *frame_data, uint32_t frame_width, uint32_t frame_height,
                          struct_algoResult *alg_result);
 
+typedef struct {
+    uint8_t valid;
+    const uint8_t *emb_input_data;
+    uint32_t emb_input_bytes;
+    int32_t emb_input_type;
+    int32_t emb_input_zp;
+    float emb_input_scale;
+    int32_t emb_input_dims[4];
+    int32_t emb_input_dims_count;
+    const uint8_t *emb_output_data;
+    uint32_t emb_output_bytes;
+    int32_t emb_output_type;
+    int32_t emb_output_zp;
+    float emb_output_scale;
+    int32_t emb_output_dims[4];
+    int32_t emb_output_dims_count;
+} face_debug_tensors_t;
+
+/**
+ * @brief Get tensors from the last successful MobileFaceNet invocation.
+ *
+ * Pointers remain owned by the face embedding runtime and are valid until the
+ * next face embedding invocation or model reinitialization.
+ */
+int cv_face_embedding_get_debug_tensors(face_debug_tensors_t *out);
+
+/**
+ * @brief Run MobileFaceNet on a deterministic synthetic input.
+ *
+ * This bypasses camera, SCRFD, and face alignment. It is intended for backend
+ * equivalence diagnostics between device Ethos-U and local TFLite CPU.
+ */
+int cv_face_embedding_run_fixed_input_test(uint32_t seed);
+
+/**
+ * @brief Run MobileFaceNet using an int8 input tensor stored in flash.
+ *
+ * This bypasses camera, SCRFD, and alignment. The input bytes must already
+ * match the model input tensor shape and quantization.
+ */
+int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t input_bytes);
+
+/**
+ * @brief Override face detection confidence threshold at runtime.
+ *
+ * Passing a value outside [0.01, 1.0] restores the build-time default.
+ */
+int cv_face_embedding_set_conf_threshold(float threshold);
+
 /**
  * @brief Deinitialize face embedding
  *

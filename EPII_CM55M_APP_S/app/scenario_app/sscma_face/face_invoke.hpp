@@ -160,7 +160,8 @@ private:
 
         /* Include image only for UART caller (face registration app).
          * SPI caller (ESP32) doesn't need image — avoids RX buffer overflow. */
-        bool include_image = (static_cast<Transport*>(_caller)->type == EL_TRANSPORT_UART);
+        bool include_image =
+            !_results_only && (static_cast<Transport*>(_caller)->type == EL_TRANSPORT_UART);
         response += ", ";
         response += img_2_json_str(include_image ? jpeg_ptr : nullptr);
         response += ", ";
@@ -173,15 +174,17 @@ private:
             /* Build face JSON with embedding.
              * Uses fmt_fixed() instead of %f because newlib-nano
              * doesn't support float formatting in snprintf. */
-            char face_buf[4096];  // Enough for one face with 128D embedding
-            int len = snprintf(face_buf, sizeof(face_buf),
+            std::string face_json;
+            char tmp[160];
+            int len = snprintf(tmp, sizeof(tmp),
                 ", \"faces\": [{\"box\": [%d, %d, %d, %d], \"score\": %d, \"quality\": ",
                 embedding_result.bbox.x, embedding_result.bbox.y,
                 embedding_result.bbox.width, embedding_result.bbox.height,
                 (int)(embedding_result.confidence * 100));
-            len += fmt_fixed(face_buf + len, sizeof(face_buf) - len,
-                             embedding_result.quality, 2);
-            len += snprintf(face_buf + len, sizeof(face_buf) - len,
+            face_json.append(tmp, len);
+            len = fmt_fixed(tmp, sizeof(tmp), embedding_result.quality, 2);
+            face_json.append(tmp, len);
+            len = snprintf(tmp, sizeof(tmp),
                 ", \"landmarks\": [[%d, %d], [%d, %d], [%d, %d], [%d, %d], [%d, %d]], "
                 "\"embedding\": [",
                 (int)embedding_result.landmarks[0].x, (int)embedding_result.landmarks[0].y,
@@ -189,18 +192,19 @@ private:
                 (int)embedding_result.landmarks[2].x, (int)embedding_result.landmarks[2].y,
                 (int)embedding_result.landmarks[3].x, (int)embedding_result.landmarks[3].y,
                 (int)embedding_result.landmarks[4].x, (int)embedding_result.landmarks[4].y);
+            face_json.append(tmp, len);
 
             /* Add embedding values using fmt_fixed (no %f) */
             for (int i = 0; i < EMBEDDING_OUTPUT_DIM; i++) {
-                len += fmt_fixed(face_buf + len, sizeof(face_buf) - len,
-                                 embedding_result.embedding[i], 4);
+                len = fmt_fixed(tmp, sizeof(tmp), embedding_result.embedding[i], 4);
+                face_json.append(tmp, len);
                 if (i < EMBEDDING_OUTPUT_DIM - 1) {
-                    len += snprintf(face_buf + len, sizeof(face_buf) - len, ", ");
+                    face_json += ", ";
                 }
             }
-            len += snprintf(face_buf + len, sizeof(face_buf) - len, "]}]");
+            face_json += "]}]";
 
-            response += face_buf;
+            response += face_json;
         } else {
             response += ", \"faces\": []";
         }
@@ -245,13 +249,16 @@ private:
 
         el_img_t jpeg_frame = {};
         camera->get_processed_frame(&jpeg_frame);
+#if FACE_STOP_STREAM_BEFORE_INFERENCE
+        camera->stop_stream();
+#endif
 
         /* FIX 2: SCRFD runs every frame (~4ms), MobileFaceNet only every EMBED_INTERVAL frames (~15ms).
          * Skip frames get fresh bbox from SCRFD but reuse last embedding.
          * This keeps detection responsive while reducing avg frame time. */
         struct_algoResult algo_result = {};
         face_embedding_msg_t embedding_result = {};
-        bool run_embedding = (_times % EMBED_INTERVAL == 0);
+        bool run_embedding = !_has_embedding || (_times % EMBED_INTERVAL == 0);
 
         if (run_embedding) {
             /* Full pipeline: SCRFD + alignment + MobileFaceNet */
@@ -262,6 +269,7 @@ private:
             }
             /* Cache embedding for skip frames */
             _last_embedding_result = embedding_result;
+            _has_embedding = (algo_result.num_tracked_human_targets > 0);
         } else {
             /* Detection only: fresh bbox, reuse last embedding */
             cv_face_detect_only(frame.data, frame.width, frame.height, &algo_result);
@@ -276,7 +284,9 @@ private:
             }
         }
 
+#if !FACE_STOP_STREAM_BEFORE_INFERENCE
         camera->stop_stream();
+#endif
 
         /* FIX 1 (continued): Check again after inference — catch commands that arrived during processing */
         if (static_resource->current_task_id.load(std::memory_order_seq_cst) != _task_id) [[unlikely]]
@@ -313,6 +323,7 @@ private:
 
     /* Cached embedding for skip frames (FIX 2) */
     face_embedding_msg_t _last_embedding_result = {};
+    bool _has_embedding = false;
 };
 
 }  // namespace sscma::callback
