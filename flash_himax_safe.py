@@ -66,14 +66,16 @@ def main():
     print()
 
     try:
-        # Run sscma.cli flasher
-        env = os.environ.copy()
+        # Use xmodem_send.py for flashing
+        xmodem_script = os.path.join(script_dir, "xmodem", "xmodem_send.py")
         result = subprocess.run(
             [
-                "/tmp/sscma_flash_env/bin/python", "-m", "sscma.cli.cli",
-                "flasher", "-p", HIMAX_PORT, "-f", firmware_path
+                sys.executable, xmodem_script,
+                "--port", HIMAX_PORT,
+                "--baudrate", "921600",
+                "--file", firmware_path
             ],
-            env=env
+            timeout=120
         )
         flash_success = (result.returncode == 0)
     except Exception as e:

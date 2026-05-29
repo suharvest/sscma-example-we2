@@ -1,9 +1,15 @@
 import argparse
 import serial
 from xmodem import XMODEM
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    tqdm = None
 import os
-import requests
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
 import time
 
 class Flasher:
@@ -63,18 +69,27 @@ class Flasher:
         # Open the file to be sent
         with open(self.file_path, "rb") as file:
             # Set up progress bar
-            progress_bar = tqdm(
-                total=file_size, unit="B", unit_scale=True, unit_divisor=1024, ncols=80
+            progress_bar = (
+                tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, ncols=80)
+                if tqdm
+                else None
             )
 
             # Define callback function to update progress bar
             def callback_written(total_packets, success_count, error_count):
-                progress_bar.update(total_packets * 128 - progress_bar.n)
+                transferred = min(total_packets * 128, file_size)
+                if progress_bar:
+                    progress_bar.update(transferred - progress_bar.n)
+                elif total_packets % 128 == 0 or transferred == file_size:
+                    print(f"\r{transferred}/{file_size} bytes", end="", flush=True)
 
             # Perform transfer
             status = self.modem.send(file, callback=callback_written)
 
-        progress_bar.close()
+        if progress_bar:
+            progress_bar.close()
+        else:
+            print()
         return status
 
     def wait_for_completion(self, timeout=10000):
@@ -131,6 +146,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if len(args.server):
+        if requests is None:
+            raise RuntimeError("requests is required when --server is used")
         # download firmware from server
         url = f"http://{args.server}/{args.firmware}"
         r = requests.get(url)
