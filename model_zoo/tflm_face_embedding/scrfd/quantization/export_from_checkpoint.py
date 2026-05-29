@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export model from checkpoint without sigmoid/clamp."""
+"""Export model from a QAT checkpoint using the current SCRFD head."""
 
 import torch
 import numpy as np
@@ -30,7 +30,7 @@ def main():
     print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
     print(f"  Val loss: {checkpoint.get('val_loss', 'unknown')}")
 
-    # Create model (without sigmoid/clamp in forward)
+    # Create model with the same score-head activation used during QAT.
     model = SCRFD()
 
     # Load original weights first

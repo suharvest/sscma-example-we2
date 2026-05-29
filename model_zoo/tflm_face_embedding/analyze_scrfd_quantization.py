@@ -227,10 +227,11 @@ def parse_scrfd_outputs(outputs, input_size=160):
                 continue
 
             ax, ay = anchors[i]
-            cx = (ax + 0.5) * stride
-            cy = (ay + 0.5) * stride
+            cx = ax * stride
+            cy = ay * stride
 
-            # Decode box (center + offset format)
+            # Decode box using the anchor corner. This matches
+            # SCRFD_DECODING.md and the firmware scrfd_postprocessing.cc path.
             box = boxes[i]
             x1 = cx - box[0] * stride
             y1 = cy - box[1] * stride

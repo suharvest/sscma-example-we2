@@ -205,7 +205,7 @@ class SCRFDHead(nn.Module):
             kps = self.stride_kps[key](x)
             B, _, H, W = cls.shape
             cls = cls.permute(0, 2, 3, 1).reshape(B, -1, 1)
-            cls = torch.clamp(cls, 0.0, 1.0)  # Clamp to [0, 1] probability range
+            cls = torch.sigmoid(cls)
             reg = reg.permute(0, 2, 3, 1).reshape(B, -1, 4)
             kps = kps.permute(0, 2, 3, 1).reshape(B, -1, 10)
             all_cls.append(cls)
@@ -396,7 +396,10 @@ def load_flat_images(data_dir: str, input_size: int, max_images: int = 20000) ->
         print(f"Data directory not found: {data_dir}")
         return None
 
-    all_images = sorted(data_path.glob("*.jpg"))
+    all_images = [
+        path for path in sorted(data_path.glob("*.jpg"))
+        if not path.name.startswith("._")
+    ]
     print(f"Found {len(all_images)} images in {data_dir}")
 
     if len(all_images) == 0:
@@ -433,7 +436,10 @@ def load_lfw_images(lfw_dir: str, input_size: int, max_images: int = 2000) -> np
         print(f"LFW directory not found: {lfw_dir}")
         return None
 
-    all_images = sorted(lfw_path.rglob("*.jpg"))
+    all_images = [
+        path for path in sorted(lfw_path.rglob("*.jpg"))
+        if not path.name.startswith("._")
+    ]
     print(f"Found {len(all_images)} images in LFW")
 
     if len(all_images) > max_images:
@@ -551,7 +557,8 @@ def train_qat_enhanced(
     lr: float = 1e-4,
     warmup_epochs: int = 1,
     grad_clip: float = 1.0,
-    output_prefix: str = "scrfd_qat"
+    output_prefix: str = "scrfd_qat",
+    device: str = "auto",
 ):
     """
     Enhanced QAT training with:
@@ -572,6 +579,12 @@ def train_qat_enhanced(
     if val_data is not None:
         print(f"  Val samples: {len(val_data)}")
 
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_device = torch.device(device)
+    print(f"  Device: {torch_device}")
+
+    model.to(torch_device)
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
 
@@ -619,7 +632,7 @@ def train_qat_enhanced(
             batch_images_np = train_data[batch_indices]
             batch_images = torch.from_numpy(
                 np.transpose(batch_images_np, (0, 3, 1, 2))
-            ).float()
+            ).float().to(torch_device)
 
             # Get teacher outputs
             teacher_outputs = teacher.predict(batch_images_np)
@@ -635,6 +648,7 @@ def train_qat_enhanced(
                 t_tensor = torch.from_numpy(t_out).float()
                 if len(t_tensor.shape) == 2 and len(s_out.shape) == 3:
                     t_tensor = t_tensor.unsqueeze(0).expand_as(s_out)
+                t_tensor = t_tensor.to(torch_device)
                 if t_tensor.shape == s_out.shape:
                     loss = F.mse_loss(s_out, t_tensor)
                     total_loss = total_loss + loss
@@ -668,7 +682,7 @@ def train_qat_enhanced(
                     batch_images_np = val_data[batch_idx * batch_size:(batch_idx + 1) * batch_size]
                     batch_images = torch.from_numpy(
                         np.transpose(batch_images_np, (0, 3, 1, 2))
-                    ).float()
+                    ).float().to(torch_device)
                     teacher_outputs = teacher.predict(batch_images_np)
                     student_outputs = model(batch_images)
 
@@ -676,6 +690,7 @@ def train_qat_enhanced(
                         t_tensor = torch.from_numpy(t_out).float()
                         if len(t_tensor.shape) == 2 and len(s_out.shape) == 3:
                             t_tensor = t_tensor.unsqueeze(0).expand_as(s_out)
+                        t_tensor = t_tensor.to(torch_device)
                         if t_tensor.shape == s_out.shape:
                             val_loss += F.mse_loss(s_out, t_tensor).item()
 
@@ -869,6 +884,8 @@ def main():
     parser.add_argument('--skip-vela', action='store_true', help='Skip Vela compilation')
     parser.add_argument('--val-split', type=float, default=0.1,
                         help='Validation split ratio (default: 0.1)')
+    parser.add_argument('--device', default='auto',
+                        help='Training device: auto, cuda, or cpu (default: auto)')
 
     args = parser.parse_args()
 
@@ -949,7 +966,8 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         warmup_epochs=args.warmup_epochs,
-        output_prefix=output_prefix
+        output_prefix=output_prefix,
+        device=args.device,
     )
 
     # Export
@@ -977,7 +995,7 @@ def main():
         qat_key = get_qat_key(key)
         if qat_key in qat_state:
             if export_state[key].shape == qat_state[qat_key].shape:
-                export_state[key] = qat_state[qat_key]
+                export_state[key] = qat_state[qat_key].detach().cpu()
                 matched += 1
         elif key in qat_state:
             if export_state[key].shape == qat_state[key].shape:

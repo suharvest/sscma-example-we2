@@ -63,6 +63,11 @@ uv run python qat_scrfd_enhanced.py \
 # 验证模型
 echo ""
 echo "[2/2] 验证量化精度..."
+uv run python validate_scrfd_quality.py \
+    --model scrfd_qat_enhanced.tflite \
+    --image-dir ../../calibration_data/qat_160 \
+    --num-samples 200
+
 if [ -f "validate_quantization.py" ]; then
     uv run python validate_quantization.py \
         --onnx scrfd_qat_enhanced.onnx \
