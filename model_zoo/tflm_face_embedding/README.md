@@ -238,6 +238,24 @@ Production feasibility metrics:
 - At the balanced shared threshold, false-accept rates are high for all tested models: `tpair_hn_a` LFW FAR `75.0%`, CFP-FP FAR `55.0%`; w600k LFW FAR `56.7%`, CFP-FP FAR `63.3%`.
 - Feasibility conclusion: `tpair_hn_a` is useful as a low-SRAM balanced-experience candidate, but it is not production-ready for low-FAR/security-sensitive recognition. The next production gate needs a real business validation set and explicit FAR targets; the current local LFW/CFP subsets show that balanced accuracy can improve while false-accept risk remains too high.
 
+InsightFace w600k identity-distill V2 branches:
+- Evaluation command: `uv run python evaluate_embedding_models.py --max-pairs 120 --cfp-splits 1-10 --model w600k=official_mobilefacenet/w600k_mbf_int8.tflite --model iddistill=official_mobilefacenet/student_distill_w1_pairft_glint_iddistill50k_a/mfn_w1_pairft_128d.int8.tflite --model v2lfw=official_mobilefacenet/iddistill_v2_lfw/mfn_w1_pairft_128d.int8.tflite --model v2lfw2=official_mobilefacenet/iddistill_v2_lfw2/mfn_w1_pairft_128d.int8.tflite`.
+- `official_mobilefacenet/iddistill_v2_lfw/mfn_w1_pairft_128d.int8.tflite`: LFW-biased continuation from the original identity-distill model, with no CFP training pairs. It keeps SRAM at `599.83 KiB`, flash at about `1056.23 KiB`, `CPU ops=0`, `NPU=100%`. Local metrics: LFW TAR@FAR5/FAR1 `66.7%/50.8%`; CFP-FP 1-10 TAR@FAR5/FAR1 `67.3%/41.3%`; balanced score `0.803`.
+- `official_mobilefacenet/iddistill_v2_lfw2/mfn_w1_pairft_128d.int8.tflite`: continued from `v2_lfw` with stronger LFW hard-negative and threshold pressure. Vela remains `599.83 KiB` SRAM, `1056.27 KiB` flash, `CPU ops=0`, `NPU=100%`. Local metrics: LFW TAR@FAR5/FAR1 `65.0%/57.5%`; CFP-FP 1-10 TAR@FAR5/FAR1 `65.3%/36.6%`; balanced score `0.802`.
+- Current selection: `v2_lfw2` is better when strict LFW FAR1 matters because it restores LFW TAR@FAR1 to the original `iddistill` level (`57.5%`) while keeping the improved V2 shared-threshold behavior. `v2_lfw` is better when CFP-FP/side-pose recall matters more. Neither closes the gap to official w600k on LFW (`96.7%` TAR@FAR1), so production gating still needs product-like validation data and explicit FAR targets.
+
+Teacher hard-negative and persistent ArcFace follow-up:
+- `train_mfn_student_pair_finetune.py` now supports `--mine-teacher-hard-negatives`, `--arcface-head-in`, and `--arcface-head-out`. Teacher hard negatives are mined from w600k/teacher embeddings; the ArcFace classifier head is saved separately as `.npz` so future runs can continue the same class head instead of restarting it from random weights. The ArcFace head is training-only and is not exported into the TFLite model, so SRAM/flash are unchanged.
+- `official_mobilefacenet/iddistill_v2_lfw3/mfn_w1_pairft_128d.int8.tflite`: continued from `v2_lfw2` with `5000` teacher hard negatives and saved ArcFace head. Vela: `599.83 KiB` SRAM, `1056.20 KiB` flash, `CPU ops=0`, `NPU=100%`. It improved balanced shared-threshold score to `0.815`, but hurt strict LFW: LFW TAR@FAR5/FAR1 `65.8%/45.8%`; CFP-FP TAR@FAR5/FAR1 `63.4%/34.0%`.
+- `official_mobilefacenet/iddistill_v2_lfw4/mfn_w1_pairft_128d.int8.tflite`: restarted from `v2_lfw2`, loaded the `v2_lfw3` ArcFace head, and reduced teacher hard negatives to `1000`. Vela: `599.83 KiB` SRAM, `1056.20 KiB` flash, `CPU ops=0`, `NPU=100%`. It improved CFP-FP to `68.5%/40.8%`, but LFW strict metrics regressed to `62.5%/40.0%`; balanced score `0.800`.
+- Current V2 selection after these follow-ups: use `v2_lfw2` when LFW FAR1/strict low-FAR matters, `v2_lfw3` for best single shared-threshold balance, and `v2_lfw` or `v2_lfw4` when CFP-FP/side-pose recall matters. Teacher hard-negative mining is useful but too much of it shifts the model away from strict LFW; further work should use a real validation set and teacher-ranked identity data, not only LFW/CFP pair tuning.
+- `official_mobilefacenet/iddistill_v2_lfw5/mfn_w1_pairft_128d.int8.tflite`: restarted from `v2_lfw2` with no teacher hard negatives, fewer student hard negatives (`1500`), stronger hard-positive/identity-distill pressure, and a fresh saved ArcFace head. Vela: `599.84 KiB` SRAM, `1056.25 KiB` flash, `CPU ops=0`, `NPU=100%`. It improved LFW separation (`0.2252` vs `0.2168`) and shared score (`0.805` vs `0.802`), but did not beat `v2_lfw2` on the strict target: LFW TAR@FAR5/FAR1 `61.7%/55.8%`; CFP-FP TAR@FAR5/FAR1 `66.8%/38.2%`.
+- `official_mobilefacenet/iddistill_v2_lfw6/mfn_w1_pairft_128d.int8.tflite`: added explicit hard-positive oversampling via `--mine-hard-positives 800` from `v2_lfw2`, kept teacher hard negatives disabled, and used `1200` student hard negatives. Vela: `599.83 KiB` SRAM, `1056.22 KiB` flash, `CPU ops=0`, `NPU=100%`. It is the best strict-LFW variant so far: LFW TAR@FAR5/FAR1 `62.5%/58.3%`; CFP-FP TAR@FAR5/FAR1 `65.4%/40.7%`; balanced score `0.806`.
+- LFW-specific conclusion: explicit hard-positive oversampling finally moved LFW FAR1 above the previous `57.5%` ceiling, but only slightly. Keep `v2_lfw6` as the current strict-LFW candidate. The next LFW improvement attempt should either tune the hard-positive replay amount (`400/1200/1600`) or try a slightly wider student within the `<750 KiB` SRAM budget.
+- Width probe: `width=1.05` stayed at about `599.84 KiB` SRAM due to channel rounding; `width=1.10` and `width=1.15` both compiled to about `702.09 KiB`; `width=1.20` compiled to about `754.12 KiB`, which fits only if the budget is relaxed to `<760 KiB`.
+- `official_mobilefacenet/iddistill_v2_w115_lfw1/mfn_w1.15_pairft_128d.int8.tflite`: trained a wider `width=1.15` student from scratch with 50-epoch projection distillation, then the same LFW hard-positive + Glint identity-distill fine-tune recipe. Vela: `702.08 KiB` SRAM, `1394.48 KiB` flash, `CPU ops=0`, `NPU=100%`. Accuracy regressed badly versus `v2_lfw6`: LFW TAR@FAR5/FAR1 `40.0%/25.8%`; CFP-FP TAR@FAR5/FAR1 `6.8%/1.4%`; balanced score `0.667`.
+- Width conclusion: simply widening the student does not currently solve the accuracy gap. The `w1.15` run has much higher different-person similarity after distillation/fine-tune, so the next attempt should change the training recipe, not just run `width=1.20` with the same settings.
+
 ## SCRFD QAT Training
 
 For improved SCRFD detection accuracy, use Quantization-Aware Training:
@@ -260,14 +278,16 @@ See `scrfd/quantization/README.md` for detailed QAT documentation.
 ## Flashing Models
 
 ```bash
-# Flash with firmware
+# Flash with the complete firmware image and models.
+# Use output.img for bootloader full-image flashing; cm55m_s_application.img
+# is an intermediate application-partition artifact.
 ./build_and_flash.sh
 
 # Or manually:
 python3 xmodem/xmodem_send.py \
   --port=/dev/tty.usbmodem* \
   --baudrate=921600 \
-  --file=we2_image_gen_local/output_case1_sec_wlcsp/cm55m_s_application.img \
+  --file=we2_image_gen_local/output_case1_sec_wlcsp/output.img \
   --model="model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite 0x400000 0x0" \
   --model="model_zoo/tflm_face_embedding/ghostfacenet/models/ghostfacenet_fixed_int8_vela.tflite 0x510000 0x0"
 ```

@@ -13,8 +13,8 @@ Pipeline:
   6. NMS (intra-stride IoU + cross-stride center suppression)
   7. Face alignment: similarity transform from eyes → ArcFace canonical
   8. Affine warp (backward bilinear): BGR planar src → 112x112 RGB dst
-  9. Quantize to INT8: dst = src - 128
-  10. GhostFaceNet inference → 128D embedding (INT8 output)
+  9. Quantize to INT8 using the embedding model's input scale/zero-point
+  10. MobileFaceNet/GhostFaceNet inference → embedding (INT8 output)
   11. Dequantize: float = (int8_val - output_zp) * output_scale
   12. L2 normalize
 
@@ -86,10 +86,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # SCRFD INT8 TFLite — input zp=-128, matches firmware: dst = src + zp = src - 128
 SCRFD_TFLITE = SCRIPT_DIR / "scrfd" / "models" / "scrfd_500m_kps_int8.tflite"
 
-# MobileFaceNet-128D float32 TFLite — clean float32, no quantization mismatch
-# The Vela-compiled model on device uses zp=-128 but the non-Vela INT8 models
-# have zp=-1. Using float32 avoids this discrepancy while producing equivalent
-# cosine similarity for matching.
+# MobileFaceNet-128D float32 TFLite.
 MOBILEFACENET_FLOAT32_TFLITE = (
     SCRIPT_DIR / "foamliu_mobilefacenet_128d" / "foamliu_mobilefacenet_128d_float32.tflite"
 )
@@ -119,6 +116,33 @@ def load_tflite_model(path: str):
     except ImportError:
         import tensorflow as tf
         return tf.lite.Interpreter(model_path=path)
+
+
+def round_half_away_from_zero(x: np.ndarray) -> np.ndarray:
+    """Match C roundf/TFLite-style integer quantization."""
+    return np.where(x >= 0.0, np.floor(x + 0.5), np.ceil(x - 0.5))
+
+
+def quantize_embedding_input_rgb(
+    aligned_face: np.ndarray, input_scale: float, input_zp: int
+) -> np.ndarray:
+    """Quantize 112x112 RGB input exactly like firmware.
+
+    MobileFaceNet/ArcFace expects RGB pixels normalized to [-1, 1]:
+        real = pixel / 127.5 - 1
+        q = round(real / input_scale + input_zero_point)
+    """
+    if input_zp == -1 and abs(float(input_scale) - (1.0 / 127.5)) < 1e-5:
+        a = aligned_face.astype(np.int32)
+        q = np.where(a > 128, a - 128, a - 129)
+        return np.clip(q, -128, 127).astype(np.int8)
+
+    if input_scale <= 0:
+        q = aligned_face.astype(np.int32) - 128
+    else:
+        real = aligned_face.astype(np.float32) / 127.5 - 1.0
+        q = round_half_away_from_zero(real / float(input_scale) + int(input_zp))
+    return np.clip(q, -128, 127).astype(np.int8)
 
 
 # ---------------------------------------------------------------------------
@@ -838,30 +862,19 @@ class FaceEmbeddingPipeline:
 
         # Step 9: Prepare embedding model input
         if self.emb_input_dtype == np.int8:
-            # INT8 model — quantize according to the model's zero_point
-            # Device Vela model: zp=-128 → dst = pixel - 128
-            # Non-Vela QAT model: zp=-1, scale≈0.00784 → dst ≈ pixel/2 - 1
+            # INT8 model: mirror firmware quantization from RGB [-1, 1] to int8.
             emb_in_q = self.emb_interp.get_input_details()[0].get(
                 "quantization_parameters", {}
             )
             emb_in_zp = int(
                 np.asarray(emb_in_q.get("zero_points", [-128])).flat[0]
             )
-            if emb_in_zp == -128:
-                # Exact firmware path: dst = pixel - 128 (clamped)
-                emb_input = (
-                    aligned_face.astype(np.int32) - 128
-                ).clip(-128, 127).astype(np.int8)
-            else:
-                # Correct TFLite quantization: dst = round(pixel / scale + zp)
-                emb_in_scale = float(
-                    np.asarray(emb_in_q.get("scales", [1.0])).flat[0]
-                )
-                # Use exact integer formula matching firmware cvapp_face_embedding.cpp:
-                # round(pixel - 128.5) = pixel>128 ? pixel-128 : pixel-129
-                a = aligned_face.astype(np.int32)
-                emb_input = np.where(a > 128, a - 128, a - 129)
-                emb_input = np.clip(emb_input, -128, 127).astype(np.int8)
+            emb_in_scale = float(
+                np.asarray(emb_in_q.get("scales", [1.0])).flat[0]
+            )
+            emb_input = quantize_embedding_input_rgb(
+                aligned_face, emb_in_scale, emb_in_zp
+            )
             # Add batch dimension
             emb_input = emb_input[np.newaxis, ...]
             if debug:

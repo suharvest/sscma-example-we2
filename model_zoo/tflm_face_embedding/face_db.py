@@ -6,6 +6,7 @@ embedding pipeline.
 Usage:
   # Register a face
   python face_db.py register --name "John" photo.jpg
+  python face_db.py register-device-json --name "John" /tmp/himax_facedbg.json
   python face_db.py register --name "Jane" --db my_faces.json photo.jpg
 
   # Recognize a face
@@ -46,6 +47,7 @@ from compute_embedding import (
     GHOSTFACENET_INT8_TFLITE,
     SCRFD_ONNX,
     MOBILEFACENET_ONNX,
+    l2_normalize,
 )
 
 DEFAULT_DB = SCRIPT_DIR / "face_database.json"
@@ -142,9 +144,18 @@ def main():
     reg.add_argument("--backend", choices=["tflite", "onnx"], default="tflite")
     reg.add_argument("--scrfd-model", help="Override SCRFD model")
     reg.add_argument("--embedding-model", help="Override embedding model")
-    reg.add_argument("--int8-embedding", action="store_true",
-                     help="Use INT8 embedding model (closer to device)")
+    reg.add_argument("--float32-embedding", action="store_true",
+                     help="Use float32 embedding model for research/offline comparison")
     reg.add_argument("--debug", "-d", action="store_true")
+
+    # register-device-json
+    reg_dev = sub.add_parser(
+        "register-device-json",
+        help="Register a face from a device INVOKE/FACEDBG capture JSON",
+    )
+    reg_dev.add_argument("json", help="Path produced by tools/capture_facedbg.py")
+    reg_dev.add_argument("--name", "-n", required=True, help="Person name")
+    reg_dev.add_argument("--db", default=str(DEFAULT_DB), help="Database path")
 
     # recognize
     rec = sub.add_parser("recognize", help="Recognize a face from an image")
@@ -155,7 +166,8 @@ def main():
     rec.add_argument("--backend", choices=["tflite", "onnx"], default="tflite")
     rec.add_argument("--scrfd-model", help="Override SCRFD model")
     rec.add_argument("--embedding-model", help="Override embedding model")
-    rec.add_argument("--int8-embedding", action="store_true")
+    rec.add_argument("--float32-embedding", action="store_true",
+                     help="Use float32 embedding model for research/offline comparison")
     rec.add_argument("--debug", "-d", action="store_true")
 
     # list
@@ -191,16 +203,37 @@ def main():
         db.delete(args.name)
         return
 
+    if args.command == "register-device-json":
+        payload = json.loads(Path(args.json).read_text(encoding="utf-8"))
+        invoke = payload.get("invoke") or payload
+        faces = ((invoke.get("data") or {}).get("faces") or [])
+        if not faces or "embedding" not in faces[0]:
+            print("ERROR: No face embedding found in device JSON")
+            sys.exit(1)
+
+        face = faces[0]
+        embedding = l2_normalize(np.asarray(face["embedding"], dtype=np.float32))
+        db = FaceDatabase(args.db)
+        metadata = {
+            "score": face.get("score"),
+            "quality": face.get("quality"),
+            "box": face.get("box"),
+            "source_json": os.path.basename(args.json),
+            "embedding_source": "device_invoke",
+        }
+        db.add(args.name, embedding.tolist(), metadata)
+        return
+
     # Resolve models
     if args.command in ("register", "recognize"):
         backend = args.backend
         scrfd_model = args.scrfd_model or str(SCRFD_TFLITE)
         if args.embedding_model:
             emb_model = args.embedding_model
-        elif args.int8_embedding:
-            emb_model = str(MOBILEFACENET_INT8_TFLITE)
-        elif backend == "tflite":
+        elif args.float32_embedding and backend == "tflite":
             emb_model = str(MOBILEFACENET_FLOAT32_TFLITE)
+        elif backend == "tflite":
+            emb_model = str(MOBILEFACENET_INT8_TFLITE)
         else:
             emb_model = str(MOBILEFACENET_ONNX)
 
@@ -219,6 +252,9 @@ def main():
             "quality": result["quality"],
             "pose": result["pose"],
             "source_image": os.path.basename(args.image),
+            "scrfd_model": os.path.basename(scrfd_model),
+            "embedding_model": os.path.basename(emb_model),
+            "backend": backend,
         }
         db.add(args.name, result["embedding"].tolist(), metadata)
 

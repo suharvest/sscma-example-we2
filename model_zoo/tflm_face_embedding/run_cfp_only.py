@@ -8,7 +8,7 @@ import compute_embedding
 # Relax to 1.0 so face-cropped images pass the size filter.
 compute_embedding.MAX_FACE_RATIO = 1.0
 from compute_embedding import (FaceEmbeddingPipeline, cosine_similarity,
-                                l2_normalize)
+                                l2_normalize, quantize_embedding_input_rgb)
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -96,12 +96,8 @@ def compute_embedding_with_pipeline(pipeline, image_path, use_tta=False):
         if pipeline.emb_input_dtype == np.int8:
             emb_in_q = pipeline.emb_interp.get_input_details()[0].get("quantization_parameters", {})
             emb_in_zp = int(np.asarray(emb_in_q.get("zero_points", [-128])).flat[0])
-            if emb_in_zp == -128:
-                emb_input_f = (aligned_flipped.astype(np.int32) - 128).clip(-128, 127).astype(np.int8)
-            else:
-                emb_in_scale = float(np.asarray(emb_in_q.get("scales", [1.0])).flat[0])
-                emb_float = aligned_flipped.astype(np.float32) / 255.0
-                emb_input_f = np.clip(np.round(emb_float / emb_in_scale + emb_in_zp), -128, 127).astype(np.int8)
+            emb_in_scale = float(np.asarray(emb_in_q.get("scales", [1.0])).flat[0])
+            emb_input_f = quantize_embedding_input_rgb(aligned_flipped, emb_in_scale, emb_in_zp)
         else:
             emb_input_f = (aligned_flipped.astype(np.float32) / 127.5) - 1.0
 

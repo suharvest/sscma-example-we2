@@ -48,26 +48,47 @@ def get_output_dim(model_path):
 def load_lfw_pairs(max_pairs):
     lfw = Path("datasets/lfw")
     random.seed(42)
-    people = sorted([d for d in lfw.iterdir() if d.is_dir() and len(list(d.glob("*.jpg"))) >= 2])
+    def image_paths(person):
+        return sorted(
+            p
+            for p in person.glob("*.jpg")
+            if not p.name.startswith(".") and not p.name.startswith("._")
+        )
+
+    people = sorted([d for d in lfw.iterdir() if d.is_dir() and len(image_paths(d)) >= 2])
     test_people = random.sample(people, min(max_pairs * 2, len(people)))
 
     same_pairs = []
     for person in test_people:
-        imgs = sorted(person.glob("*.jpg"))[:2]
+        imgs = image_paths(person)[:2]
         if len(imgs) == 2:
             same_pairs.append((str(imgs[0]), str(imgs[1])))
 
     diff_pairs = []
     for i in range(0, len(test_people) - 1, 2):
-        a_imgs = sorted(test_people[i].glob("*.jpg"))
-        b_imgs = sorted(test_people[i + 1].glob("*.jpg"))
+        a_imgs = image_paths(test_people[i])
+        b_imgs = image_paths(test_people[i + 1])
         if a_imgs and b_imgs:
             diff_pairs.append((str(a_imgs[0]), str(b_imgs[0])))
 
     return same_pairs[:max_pairs], diff_pairs[: max_pairs // 2]
 
 
-def load_cfp_pairs(max_pairs):
+def parse_split_ids(value):
+    splits = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" in item:
+            start, end = item.split("-", 1)
+            splits.extend(range(int(start), int(end) + 1))
+        else:
+            splits.append(int(item))
+    return sorted(set(splits))
+
+
+def load_cfp_pairs(max_pairs, split_ids=(1,)):
     cfp = Path("datasets/cfp/cfp-dataset")
 
     def load_list(path):
@@ -93,29 +114,36 @@ def load_cfp_pairs(max_pairs):
 
     frontal_map = load_list(cfp / "Protocol/Pair_list_F.txt")
     profile_map = load_list(cfp / "Protocol/Pair_list_P.txt")
-    same_raw = load_pairs(cfp / "Protocol/Split/FP/01/same.txt")
-    diff_raw = load_pairs(cfp / "Protocol/Split/FP/01/diff.txt")
-
     def idx_to_path(idx, mapping):
         img_path = mapping.get(idx, "")
         full_path = (cfp / "Protocol" / img_path).resolve()
         return str(full_path) if full_path.exists() else None
 
     same_pairs = []
-    for f_idx, p_idx in same_raw[:max_pairs]:
-        f_path = idx_to_path(f_idx, frontal_map)
-        p_path = idx_to_path(p_idx, profile_map)
-        if f_path and p_path:
-            same_pairs.append((f_path, p_path))
-
     diff_pairs = []
-    for f_idx, p_idx in diff_raw[:max_pairs]:
-        f_path = idx_to_path(f_idx, frontal_map)
-        p_path = idx_to_path(p_idx, profile_map)
-        if f_path and p_path:
-            diff_pairs.append((f_path, p_path))
 
-    return same_pairs[:max_pairs], diff_pairs[: max_pairs // 2]
+    for split_id in split_ids:
+        same_raw = load_pairs(cfp / f"Protocol/Split/FP/{split_id:02d}/same.txt")
+        diff_raw = load_pairs(cfp / f"Protocol/Split/FP/{split_id:02d}/diff.txt")
+
+        split_same = []
+        for f_idx, p_idx in same_raw[:max_pairs]:
+            f_path = idx_to_path(f_idx, frontal_map)
+            p_path = idx_to_path(p_idx, profile_map)
+            if f_path and p_path:
+                split_same.append((f_path, p_path))
+
+        split_diff = []
+        for f_idx, p_idx in diff_raw[:max_pairs]:
+            f_path = idx_to_path(f_idx, frontal_map)
+            p_path = idx_to_path(p_idx, profile_map)
+            if f_path and p_path:
+                split_diff.append((f_path, p_path))
+
+        same_pairs.extend(split_same[:max_pairs])
+        diff_pairs.extend(split_diff[: max_pairs // 2])
+
+    return same_pairs, diff_pairs
 
 
 def compute_embeddings(pipeline, paths):
@@ -336,6 +364,7 @@ def parse_model_arg(values):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pairs", type=int, default=80)
+    parser.add_argument("--cfp-splits", default="1")
     parser.add_argument(
         "--model",
         action="append",
@@ -351,7 +380,7 @@ def main():
     models = parse_model_arg(args.model) if args.model else DEFAULT_MODELS
     datasets = {
         "LFW": load_lfw_pairs(args.max_pairs),
-        "CFP-FP": load_cfp_pairs(args.max_pairs),
+        "CFP-FP": load_cfp_pairs(args.max_pairs, parse_split_ids(args.cfp_splits)),
     }
     all_paths = []
     for same_pairs, diff_pairs in datasets.values():
