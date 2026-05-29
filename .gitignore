@@ -75,3 +75,26 @@ debug_output/
 __pycache__/
 *_vela.tflite
 *_summary_*.csv
+
+# Face embedding training artifacts (large model/data outputs, kept out of git)
+*.tflite
+*.onnx.data
+*.npz
+*.ckpt
+*.h5
+*.tar
+model_zoo/tflm_face_embedding/training/
+model_zoo/tflm_face_embedding/training_output/
+model_zoo/tflm_face_embedding/output/
+model_zoo/tflm_face_embedding/edgeface/
+model_zoo/tflm_face_embedding/sface/
+model_zoo/tflm_face_embedding/**/saved_model/
+model_zoo/tflm_face_embedding/**/saved_model_*/
+model_zoo/tflm_face_embedding/official_mobilefacenet/iddistill_*/
+model_zoo/tflm_face_embedding/official_mobilefacenet/student_distill*/
+model_zoo/tflm_face_embedding/official_mobilefacenet/w600k_*/
+model_zoo/tflm_face_embedding/official_mobilefacenet/mfn128_*/
+model_zoo/tflm_face_embedding/official_mobilefacenet/width_probe/
+artifacts/
+# stray root-level tflite exports
+/w600k_stage96_pairft.*.tflite
