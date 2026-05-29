@@ -8,7 +8,7 @@
 #
 # Models:
 #   - SCRFD: Face detection (160x160, ~700KB)
-#   - MobileFaceNet: Face embedding 128D (112x112, ~400KB)
+#   - MobileFaceNet: distilled QAT 128D embedding (112x112, ~1.26MB flash)
 #
 
 set -e
@@ -19,9 +19,9 @@ OUTPUT_IMG="${PROJECT_ROOT}/we2_image_gen_local/output_case1_sec_wlcsp/output.im
 
 # Model paths
 SCRFD_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite"
-SCRFD_ADDR="0x200000"
-EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/foamliu_mobilefacenet_128d/foamliu_mobilefacenet_128d_qat_int8_vela.tflite"
-EMBEDDING_ADDR="0x400000"
+SCRFD_ADDR="0x400000"
+EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/training/output/qat_distilled_128d/model_distilled_qat.int8_vela.tflite"
+EMBEDDING_ADDR="0x510000"
 
 # Serial port (auto-detect)
 SERIAL_PORT=$(ls /dev/tty.usbmodem* 2>/dev/null | head -1)
@@ -49,7 +49,7 @@ echo "========================================"
 echo "  Grove Vision AI Module V2 Flash Tool"
 echo "========================================"
 echo ""
-echo "Models: SCRFD + MobileFaceNet 128D"
+echo "Models: SCRFD + MobileFaceNet distilled QAT 128D"
 echo ""
 
 # Check serial port

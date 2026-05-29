@@ -10,7 +10,7 @@
 #
 # Models:
 #   - SCRFD: Face detection (160x160, ~700KB)
-#   - MobileFaceNet: Face embedding 128D (112x112, ~400KB)
+#   - MobileFaceNet: distilled QAT 128D embedding (112x112, ~1.26MB flash)
 #
 
 set -e
@@ -23,12 +23,13 @@ OUTPUT_DIR="${IMAGE_GEN_DIR}/output_case1_sec_wlcsp"
 ELF_FILE="${APP_DIR}/obj_epii_evb_icv30_bdv10/gnu_epii_evb_WLCSP65/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf"
 
 # App configuration
-MAKEFILE_APP_TYPE="tflm_face_embedding"
+MAKEFILE_APP_TYPE="sscma_face"
+BUILD_TARGET="${BUILD_TARGET:-SENSECAP_WATCHER}"
 
 # Model paths
 SCRFD_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite"
 SCRFD_ADDR="0x400000"
-EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/foamliu_mobilefacenet_128d/foamliu_mobilefacenet_128d_qat_int8_vela.tflite"
+EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/training/output/qat_distilled_128d/model_distilled_qat.int8_vela.tflite"
 EMBEDDING_ADDR="0x510000"
 
 # Serial port (auto-detect)
@@ -63,7 +64,8 @@ echo "  Grove Vision AI Module V2 Build Tool"
 echo "========================================"
 echo ""
 echo "App: ${MAKEFILE_APP_TYPE}"
-echo "Models: SCRFD + MobileFaceNet 128D"
+echo "Target: ${BUILD_TARGET}"
+echo "Models: SCRFD + MobileFaceNet distilled QAT 128D"
 echo ""
 
 # Step 1: Build firmware
@@ -76,15 +78,16 @@ sed -i.bak "s/^APP_TYPE = .*/APP_TYPE = ${MAKEFILE_APP_TYPE}/" makefile && rm -f
 echo "Set APP_TYPE = ${MAKEFILE_APP_TYPE} in makefile"
 echo ""
 if [ ${NO_CLEAN} -eq 0 ]; then
-    gmake clean
+    gmake clean TARGET="${BUILD_TARGET}"
     echo ""
 else
     echo "(Skipping clean - incremental build)"
     echo ""
 fi
-echo "Compiling (parallel, $(sysctl -n hw.ncpu) cores)..."
+CPU_CORES=$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+echo "Compiling (parallel, ${CPU_CORES} cores)..."
 echo ""
-gmake -j$(sysctl -n hw.ncpu)
+gmake -j"${CPU_CORES}" TARGET="${BUILD_TARGET}"
 
 # Verify ELF file
 if [ ! -f "${ELF_FILE}" ]; then
@@ -173,7 +176,7 @@ PYTHON_CMD="uv run --directory ${XMODEM_DIR} python"
 if [ ${NO_MODEL} -eq 0 ]; then
     # Flash with models
     if [ -f "${SCRFD_MODEL}" ] && [ -f "${EMBEDDING_MODEL}" ]; then
-        echo "Flashing firmware + SCRFD + MobileFaceNet models..."
+        echo "Flashing firmware + SCRFD + MobileFaceNet distilled QAT models..."
         echo ""
         ${PYTHON_CMD} ${XMODEM_DIR}/xmodem_send.py \
             --port="${SERIAL_PORT}" \
