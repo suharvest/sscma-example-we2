@@ -662,16 +662,16 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         return -21;
     }
 
-    /* Rebuild both interpreters in-place. On mode2 re-entry the previous
-     * objects must be destructed before placement-new reconstructs them into
-     * the freshly reset arena; this resets the TFLM allocator so a subsequent
-     * AllocateTensors re-lays tensors cleanly even if YOLO clobbered the arena
-     * while we were in mode1. */
-    if (s_interp_constructed) {
-        fd_int_ptr->~MicroInterpreter();
-        emb_int_ptr->~MicroInterpreter();
-        s_interp_constructed = false;
-    }
+    /* Rebuild both interpreters in-place via placement-new. We deliberately do
+     * NOT destruct the previous objects first: after a YOLO (mode1) run the
+     * shared arena has been memset+overwritten, so the old face interpreters'
+     * arena-resident subgraph_allocations_/node_and_registrations now hold YOLO
+     * garbage. ~MicroInterpreter's FreeSubgraphs() would walk that garbage and
+     * call a wild registration->free() -> HardFault -> reboot. The arena-pool
+     * MicroInterpreter owns no heap resources (everything lives in the arena),
+     * so placement-new-ing over the clobbered storage is leak-free and skips the
+     * only line that reads corrupted memory. */
+    xprintf("[FACE-INIT +%ums] pre-construct\n", face_init_ms());
 #if TFLM2209_U55TAG2205
     static tflite::MicroErrorReporter micro_error_reporter;
     fd_int_ptr = new (fd_interp_storage) tflite::MicroInterpreter(
@@ -691,6 +691,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         (uint8_t *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
 #endif
     s_interp_constructed = true;
+    xprintf("[FACE-INIT +%ums] post-construct\n", face_init_ms());
 
     /* Allocate tensors — the two Ethos-U AllocateTensors calls are the only
      * long CPU-blocking steps of init and cannot feed the watchdog while
@@ -715,6 +716,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         return -27;
     }
     xprintf("[FACE-INIT +%ums] FaceNet AllocateTensors() done\n", face_init_ms());
+    xprintf("[FACE-INIT +%ums] tensors-allocated\n", face_init_ms());
     /* Models allocated — re-arm the hardware watchdog (3s RESET). */
     face_wdt_rearm();
     xprintf("[FACE-INIT +%ums] WDT re-armed (3s RESET)\n", face_init_ms());
