@@ -151,7 +151,7 @@
 #endif
 
 /* Face detection thresholds */
-#define FACE_CONF_THRESHOLD             0.40f   /* Confidence threshold (lowered: Vela model logits via sigmoid) */
+#define FACE_CONF_THRESHOLD             0.50f   /* Confidence threshold doubles as quality gate: only high-score frontal faces pass. Calibrated from cross-domain data: score~45 -> cosine 0.27 (bad), score~79 -> cosine 0.44 (good). 0.50 rejects the low-quality edge frames so the embedding handed to the matcher is reliable. */
 #define FACE_NMS_THRESHOLD              0.4f    /* NMS IoU threshold */
 #define MIN_FACE_SIZE                   40      /* Minimum face size in pixels */
 
