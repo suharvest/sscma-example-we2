@@ -205,6 +205,73 @@ static inline void face_runtime_keepalive(void)
 #endif
 }
 
+/*
+ * Reload the active hardware watchdog (WDT ID_0) to `ms` milliseconds.
+ *
+ * WDT ID_0 is started in el_device_we2.cpp (DeviceWE2::init) with a 3s
+ * (WATCH_DOG_TIMEOUT_TH) RESET timeout. The one-time face-mode init below runs
+ * two Ethos-U AllocateTensors (SCRFD + MobileFaceNet) that block the CPU for
+ * ~6s total, far longer than 3s, with no chance to feed the dog -> hardware WDT
+ * reset before the models finish loading. We temporarily reload the WDT to a
+ * large timeout around each AllocateTensors, then restore the normal 3s.
+ *
+ * NOTE: both WATCHDOG_ID_0 (an enum constant) and WATCH_DOG_TIMEOUT_TH are NOT
+ * visible as macros in this translation unit, so the older
+ * `#if defined(...)` guards in face_runtime_keepalive() compile the feed OUT
+ * (it is a no-op). We call the driver directly and unconditionally here.
+ * Runtime survival otherwise relies on el_sspi_we2.cpp feeding the dog during
+ * SPI transfers, which does not happen while the CPU is stuck in AllocateTensors.
+ */
+#define FACE_INIT_WDT_TIMEOUT_MS 20000u  /* ample margin over the ~6s load     */
+#define FACE_RUNTIME_WDT_TIMEOUT_MS 3000u /* matches board WATCH_DOG_TIMEOUT_TH */
+
+static inline void face_wdt_reload_ms(uint32_t ms)
+{
+    hx_drv_watchdog_update(WATCHDOG_ID_0, ms);
+}
+
+/*
+ * Robust watchdog handling for the one-time face-mode init.
+ *
+ * The two Ethos-U AllocateTensors calls (SCRFD + MobileFaceNet) block the CPU
+ * for many seconds each with no chance to feed the dog. Merely RELOADING a
+ * large timeout before each call is fragile: if a SINGLE AllocateTensors
+ * exceeds the reloaded window the 3s -> WATCHDOG_RESET fires anyway (observed
+ * ~40s reset with a 2x20s reload). Instead we fully STOP WDT ID_0 around the
+ * whole allocate section, then re-START it with the same 3s RESET config once
+ * the models are allocated. While stopped the load can take arbitrarily long
+ * without being interrupted.
+ */
+static void face_wdg_reset_cb(uint32_t event)
+{
+    (void)event;
+    hx_drv_watchdog_irq_clear(WATCHDOG_ID_0);
+    hx_drv_watchdog_stop(WATCHDOG_ID_0);
+    __NVIC_SystemReset();
+}
+
+static inline void face_wdt_disable(void)
+{
+    hx_drv_watchdog_stop(WATCHDOG_ID_0);
+}
+
+static inline void face_wdt_rearm(void)
+{
+    WATCHDOG_CFG_T cfg;
+    cfg.period = FACE_RUNTIME_WDT_TIMEOUT_MS;  /* 3000ms, matches board default */
+    cfg.ctrl   = WATCHDOG_CTRL_CPU;
+    cfg.state  = WATCHDOG_STATE_DC;
+    cfg.type   = WATCHDOG_RESET;
+    hx_drv_watchdog_start(WATCHDOG_ID_0, &cfg, face_wdg_reset_cb);
+}
+
+/* Relative-timestamp logging for the one-time init / first-frame load path. */
+static uint64_t g_face_init_t0_ms = 0;
+static inline uint32_t face_init_ms(void)
+{
+    return (uint32_t)(el_get_time_ms() - g_face_init_t0_ms);
+}
+
 static inline uint8_t clip_u8(int32_t v)
 {
     if (v < 0) return 0;
@@ -297,7 +364,17 @@ static TfLiteStatus invoke_mobilefacenet_from_current_input()
     __ISB();
     SCB_DisableDCache();
 #endif
+    static bool s_first_emb_invoke = true;
+    if (s_first_emb_invoke) {
+        xprintf("[FACE-RUN +%ums] first MobileFaceNet Invoke() start\n",
+                (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
+    }
     TfLiteStatus invoke_status = emb_int_ptr->Invoke();
+    if (s_first_emb_invoke) {
+        xprintf("[FACE-RUN +%ums] first MobileFaceNet Invoke() done\n",
+                (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
+        s_first_emb_invoke = false;
+    }
 #if FACE_DISABLE_DCACHE_FOR_EMB_INVOKE
     SCB_EnableDCache();
     SCB_CleanInvalidateDCache();
@@ -448,14 +525,17 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         return 0;
     }
 
-    xprintf("Face Embedding Init...\n");
+    g_face_init_t0_ms = el_get_time_ms();
+    xprintf("[FACE-INIT +%ums] Face Embedding Init...\n", face_init_ms());
 
     /*
      * Memory allocation - reset elHeap bump allocator to reclaim memory used by
      * sscma_micro's YOLO tensor arena (1110 KB), then allocate face buffers.
      * This is safe because face mode doesn't use sscma_micro's standard model.
      */
+    xprintf("[FACE-INIT +%ums] el_aligned_malloc_reset()...\n", face_init_ms());
     el_aligned_malloc_reset();
+    xprintf("[FACE-INIT +%ums] reset done; allocating face buffers\n", face_init_ms());
     void* fd_arena = el_aligned_malloc_once(32, scrfd_arena_size);
     void* emb_arena = el_aligned_malloc_once(32, mobilefacenet_arena_size);
     void* buf1 = el_aligned_malloc_once(32, fd_resize_image_size);
@@ -474,15 +554,18 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
     fd_resized_img = (uint32_t)buf1;
     aligned_face_img = (uint32_t)buf2;
 
-    xprintf("Face buffers allocated from elHeap\n");
+    xprintf("[FACE-INIT +%ums] face buffers allocated from elHeap\n", face_init_ms());
 
     /* NOTE: NPU initialization is completely SKIPPED here because sscma_micro
      * (el_device_we2.cpp) already initializes the Ethos-U55 NPU at device startup.
      */
 
     /* Load models from flash */
+    xprintf("[FACE-INIT +%ums] GetModel SCRFD@0x%08X emb@0x%08X...\n",
+            face_init_ms(), fd_model_addr, embedding_model_addr);
     static const tflite::Model *fd_model = tflite::GetModel((const void *)fd_model_addr);
     static const tflite::Model *emb_model = tflite::GetModel((const void *)embedding_model_addr);
+    xprintf("[FACE-INIT +%ums] GetModel done\n", face_init_ms());
 
     /* Model Integrity Check - silent on success */
     uint8_t* scrfd_bytes = (uint8_t*)fd_model_addr;
@@ -546,6 +629,8 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
 #endif
     }
 
+    xprintf("[FACE-INIT +%ums] op_resolver ready; constructing interpreters\n", face_init_ms());
+
     /* Create interpreters */
 
     if (scrfd_tensor_arena == 0) {
@@ -576,15 +661,32 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         (uint8_t *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
 #endif
 
-    /* Allocate tensors */
+    /* Allocate tensors — the two Ethos-U AllocateTensors calls are the only
+     * long CPU-blocking steps of init and cannot feed the watchdog while
+     * running. Prior attempts only RELOADED a large timeout before each call,
+     * but a single AllocateTensors that exceeds that window still triggers the
+     * 3s WATCHDOG_RESET (observed ~40s reset). Instead we fully STOP the
+     * watchdog for the whole allocate section and re-arm it (3s RESET) once
+     * both models are ready, so the load cannot be interrupted no matter how
+     * long it takes. */
+    face_wdt_disable();
+    xprintf("[FACE-INIT +%ums] WDT stopped; SCRFD AllocateTensors() start\n", face_init_ms());
     if (fd_static_interpreter.AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: SCRFD tensor allocation failed\n");
+        face_wdt_rearm();
         return -26;
     }
+    xprintf("[FACE-INIT +%ums] SCRFD AllocateTensors() done; FaceNet AllocateTensors() start\n",
+            face_init_ms());
     if (emb_static_interpreter.AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: MobileFaceNet tensor allocation failed\n");
+        face_wdt_rearm();
         return -27;
     }
+    xprintf("[FACE-INIT +%ums] FaceNet AllocateTensors() done\n", face_init_ms());
+    /* Models allocated — re-arm the hardware watchdog (3s RESET). */
+    face_wdt_rearm();
+    xprintf("[FACE-INIT +%ums] WDT re-armed (3s RESET)\n", face_init_ms());
     /* Setup SCRFD interpreter */
     fd_int_ptr = &fd_static_interpreter;
     fd_input = fd_static_interpreter.input(0);
@@ -728,7 +830,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * then passes YUV422P data here. We convert to RGB888 using el_img_convert(). */
 
     g_face_emb_init = 1;
-    xprintf("Face init OK\n");
+    xprintf("[FACE-INIT +%ums] Face init OK\n", face_init_ms());
 
     return 0;
 }
@@ -887,11 +989,19 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
 
     /* D-Cache Coherency Fix - CRITICAL for NPU */
     clean_dcache_range(fd_input->data.data, fd_input->bytes);
-    
+
+    if (frame_count == 1) {
+        xprintf("[FACE-RUN +%ums] frame 1: SCRFD Invoke() start\n",
+                (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
+    }
     invoke_status = fd_int_ptr->Invoke();
     if (invoke_status != kTfLiteOk) {
         xprintf("ERROR: SCRFD invoke failed\n");
         return -1;
+    }
+    if (frame_count == 1) {
+        xprintf("[FACE-RUN +%ums] frame 1: SCRFD Invoke() done\n",
+                (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
     }
 
     /* CRITICAL: Invalidate D-Cache for output tensors after NPU inference
