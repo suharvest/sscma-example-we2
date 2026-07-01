@@ -114,20 +114,19 @@ private:
     }
 
     bool initFaceModels() {
-        static bool models_initialized = false;
-        if (!models_initialized) {
-            int ret = cv_face_embedding_init(
-                true, true,
-                FACE_DETECT_FLASH_ADDR,
-                FACE_EMBEDDING_FLASH_ADDR);
-            if (ret != 0) {
-                EL_LOGW("[FaceInvoke] Face embedding init failed: %d", ret);
-                _ret = EL_EIO;
-                return false;
-            }
-            models_initialized = true;
-            EL_LOGI("[FaceInvoke] Face models initialized");
+        /* No local guard: cv_face_embedding_init() now rebuilds the interpreters
+         * (placement-new) on every mode2 entry so a prior mode1 (YOLO) run that
+         * clobbered the shared arena can't leave us on a stale interpreter. */
+        int ret = cv_face_embedding_init(
+            true, true,
+            FACE_DETECT_FLASH_ADDR,
+            FACE_EMBEDDING_FLASH_ADDR);
+        if (ret != 0) {
+            EL_LOGW("[FaceInvoke] Face embedding init failed: %d", ret);
+            _ret = EL_EIO;
+            return false;
         }
+        EL_LOGI("[FaceInvoke] Face models initialized");
         return true;
     }
 

@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <new>  /* placement new for interpreter rebuild */
 #include "WE2_device.h"
 #include "board.h"
 #include "cvapp_face_embedding.h"
@@ -187,6 +188,23 @@ static int32_t emb_input_dims[4] = {};
 static int32_t emb_output_dims[4] = {};
 static int32_t emb_input_dims_count = 0;
 static int32_t emb_output_dims_count = 0;
+
+/*
+ * Storage for placement-new rebuild of the two face interpreters.
+ *
+ * The SCRFD/FaceNet arenas physically overlap YOLO's shared elHeap bump
+ * region, so a mode2->mode1->mode2 sequence lets YOLO's set_model memset
+ * clobber the face arena. We therefore rebuild both interpreters (explicit
+ * destruct + placement-new + AllocateTensors) on every mode2 entry, which
+ * resets the TFLM allocator and re-lays the arena cleanly. Interpreter
+ * objects are non-trivially destructible, so we keep their storage here and
+ * manage lifetime manually. op_resolver AddEthosU stays one-time
+ * (MicroMutableOpResolver<1> cannot re-register).
+ */
+alignas(tflite::MicroInterpreter) static uint8_t fd_interp_storage[sizeof(tflite::MicroInterpreter)];
+alignas(tflite::MicroInterpreter) static uint8_t emb_interp_storage[sizeof(tflite::MicroInterpreter)];
+static bool s_interp_constructed = false;
+static bool s_op_resolver_ready  = false;
 
 /* SCRFD network configuration */
 scrfd_network scrfd_net;
@@ -521,9 +539,9 @@ static tflite::MicroMutableOpResolver<1> op_resolver;
 int cv_face_embedding_init(bool security_enable, bool privilege_enable,
                            uint32_t fd_model_addr, uint32_t embedding_model_addr)
 {
-    if (g_face_emb_init) {
-        return 0;
-    }
+    /* NOTE: no early-return on g_face_emb_init. This function is re-run on
+     * every mode2 entry so the interpreters are rebuilt (placement-new) into a
+     * freshly reset arena — see fd_interp_storage / s_interp_constructed. */
 
     g_face_init_t0_ms = el_get_time_ms();
     xprintf("[FACE-INIT +%ums] Face Embedding Init...\n", face_init_ms());
@@ -591,8 +609,9 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         xprintf("ERROR: MobileFaceNet schema mismatch\n");
         return -3;
     }
-    /* Register operators */
-    if (g_face_emb_init == 0) {
+    /* Register operators — must stay one-time: MicroMutableOpResolver<1>
+     * overflows (-4) if AddEthosU is called twice across mode2 rebuilds. */
+    if (!s_op_resolver_ready) {
         if (kTfLiteOk != op_resolver.AddEthosU()) {
             xprintf("ERROR: Failed to add Ethos-U\n");
             return -4;
@@ -627,6 +646,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
             return -13;
         }
 #endif
+        s_op_resolver_ready = true;
     }
 
     xprintf("[FACE-INIT +%ums] op_resolver ready; constructing interpreters\n", face_init_ms());
@@ -642,24 +662,35 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         return -21;
     }
 
+    /* Rebuild both interpreters in-place. On mode2 re-entry the previous
+     * objects must be destructed before placement-new reconstructs them into
+     * the freshly reset arena; this resets the TFLM allocator so a subsequent
+     * AllocateTensors re-lays tensors cleanly even if YOLO clobbered the arena
+     * while we were in mode1. */
+    if (s_interp_constructed) {
+        fd_int_ptr->~MicroInterpreter();
+        emb_int_ptr->~MicroInterpreter();
+        s_interp_constructed = false;
+    }
 #if TFLM2209_U55TAG2205
     static tflite::MicroErrorReporter micro_error_reporter;
-    static tflite::MicroInterpreter fd_static_interpreter(
+    fd_int_ptr = new (fd_interp_storage) tflite::MicroInterpreter(
         fd_model, op_resolver,
         (uint8_t *)scrfd_tensor_arena, scrfd_arena_size,
         &micro_error_reporter);
-    static tflite::MicroInterpreter emb_static_interpreter(
+    emb_int_ptr = new (emb_interp_storage) tflite::MicroInterpreter(
         emb_model, op_resolver,
         (uint8_t *)mobilefacenet_tensor_arena, mobilefacenet_arena_size,
         &micro_error_reporter);
 #else
-    static tflite::MicroInterpreter fd_static_interpreter(
+    fd_int_ptr = new (fd_interp_storage) tflite::MicroInterpreter(
         fd_model, op_resolver,
         (uint8_t *)scrfd_tensor_arena, scrfd_arena_size);
-    static tflite::MicroInterpreter emb_static_interpreter(
+    emb_int_ptr = new (emb_interp_storage) tflite::MicroInterpreter(
         emb_model, op_resolver,
         (uint8_t *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
 #endif
+    s_interp_constructed = true;
 
     /* Allocate tensors — the two Ethos-U AllocateTensors calls are the only
      * long CPU-blocking steps of init and cannot feed the watchdog while
@@ -671,14 +702,14 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * long it takes. */
     face_wdt_disable();
     xprintf("[FACE-INIT +%ums] WDT stopped; SCRFD AllocateTensors() start\n", face_init_ms());
-    if (fd_static_interpreter.AllocateTensors() != kTfLiteOk) {
+    if (fd_int_ptr->AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: SCRFD tensor allocation failed\n");
         face_wdt_rearm();
         return -26;
     }
     xprintf("[FACE-INIT +%ums] SCRFD AllocateTensors() done; FaceNet AllocateTensors() start\n",
             face_init_ms());
-    if (emb_static_interpreter.AllocateTensors() != kTfLiteOk) {
+    if (emb_int_ptr->AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: MobileFaceNet tensor allocation failed\n");
         face_wdt_rearm();
         return -27;
@@ -687,12 +718,11 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
     /* Models allocated — re-arm the hardware watchdog (3s RESET). */
     face_wdt_rearm();
     xprintf("[FACE-INIT +%ums] WDT re-armed (3s RESET)\n", face_init_ms());
-    /* Setup SCRFD interpreter */
-    fd_int_ptr = &fd_static_interpreter;
-    fd_input = fd_static_interpreter.input(0);
+    /* Setup SCRFD interpreter (fd_int_ptr already set by placement-new above) */
+    fd_input = fd_int_ptr->input(0);
 
     /* Get SCRFD output tensors */
-    int num_outputs = fd_static_interpreter.outputs_size();
+    int num_outputs = fd_int_ptr->outputs_size();
 
     /* Initialize all to nullptr first */
     for (int i = 0; i < SCRFD_NUM_STRIDES; i++) {
@@ -703,7 +733,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
 
     /* Map outputs by shape analysis - handle both 2D (Vela) and 4D (original) formats */
     for (int i = 0; i < num_outputs; i++) {
-        TfLiteTensor* t = fd_static_interpreter.output(i);
+        TfLiteTensor* t = fd_int_ptr->output(i);
 
         int stride_idx = -1;
         int tensor_type = -1;  /* 0=score, 1=bbox, 2=kps */
@@ -758,7 +788,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
             fd_input->params.zero_point,
             (int)(fd_input->params.scale * 1000000));
     for (int i = 0; i < num_outputs; i++) {
-        TfLiteTensor* t = fd_static_interpreter.output(i);
+        TfLiteTensor* t = fd_int_ptr->output(i);
         xprintf("  out[%d]: dims=%d [", i, t->dims->size);
         for (int d = 0; d < t->dims->size; d++) {
             xprintf("%d%s", t->dims->data[d], d < t->dims->size - 1 ? "," : "");
@@ -789,10 +819,9 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         FD_INPUT_TENSOR_WIDTH, FD_INPUT_TENSOR_HEIGHT,
         g_face_conf_threshold, FACE_NMS_THRESHOLD);
 
-    /* Setup MobileFaceNet interpreter */
-    emb_int_ptr = &emb_static_interpreter;
-    emb_input = emb_static_interpreter.input(0);
-    emb_output = emb_static_interpreter.output(0);
+    /* Setup MobileFaceNet interpreter (emb_int_ptr already set by placement-new above) */
+    emb_input = emb_int_ptr->input(0);
+    emb_output = emb_int_ptr->output(0);
     emb_input_data = emb_input ? (uint8_t *)emb_input->data.data : nullptr;
     emb_output_data = emb_output ? (uint8_t *)emb_output->data.data : nullptr;
     emb_input_bytes = emb_input ? emb_input->bytes : 0;
