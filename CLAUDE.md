@@ -577,7 +577,12 @@ AT+BREAK           # Stop inference
 
 ### Face Embedding Evaluation Scripts
 
-When reviewing FaceNet / MobileFaceNet accuracy, do not search the repo again. The useful scripts are in `model_zoo/tflm_face_embedding`:
+模型已定版（The embedding model is finalized）。**当前部署模型 / current deployed model:**
+`model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/model_128d.int8_vela.tflite`
+(QAT distill_v2 ReLU6 128D)。**生产训练流程 / production training pipeline:**
+`model_zoo/tflm_face_embedding/qat_pipeline/`（从 spark 训练机拉入，入口 `qat_finetune_if.py`，详见该目录 README）。
+
+When reviewing accuracy, do not search the repo again. The still-current eval scripts live in `model_zoo/tflm_face_embedding`:
 
 ```bash
 cd /Users/harvest/project/grove_vision_2/sscma-example-we2/model_zoo/tflm_face_embedding
@@ -591,25 +596,20 @@ uv run python run_full_comparison.py
 # CFP-FP-only stress test for frontal/profile pairs
 uv run python run_cfp_only.py
 
-# w600k 512D -> 128D post-embedding compression experiment
-uv run python evaluate_w600k_compression.py
-
-# Train a 512D -> 128D projection from cached w600k teacher embeddings
-uv run python train_w600k_projection_128d.py
-
-# Evaluate a trained projection against PCA/truncation/random projection
-uv run python evaluate_w600k_compression.py --projection outputs/w600k_projection_128d.npz
-
-# Compare w600k against local lower-SRAM embedding candidates
+# Compare against local lower-SRAM embedding candidates
 uv run python evaluate_embedding_models.py
 ```
 
 Notes:
 - `_device_compare.py` is the "simulated device environment" entry point; it models the firmware INT8 input path such as `pixel - 129`.
-- Update each script's `models` dictionary before running. Some entries are historical and still point to `mobilefacenet_no_bn_*` or `mobilefacenet_qat_*`.
+- Update each script's `models` dictionary before running. Point entries at `qat_distill_v2_relu6_128d/` for the deployed model.
 - Vela `*_vela.tflite` files contain the `ethos-u` custom op and cannot be evaluated directly with PC TFLite. Evaluate pre-Vela INT8 for accuracy, then inspect Vela summary for SRAM, flash, and NPU coverage.
-- Recent testing indicated the original quantized w600k model, `official_mobilefacenet/w600k_mbf_int8.tflite`, was the discriminability baseline to preserve.
-- `evaluate_w600k_compression.py` checks whether 512D embeddings can be compressed to 128D after inference. It does not reduce Ethos-U tensor arena SRAM; use Vela summaries for that.
+- **已归档 / archived:** the old w600k-line experiments (`evaluate_w600k_compression.py`,
+  `train_w600k_projection_128d.py`, the `export_w600k_*` / `train_w600k_*` /
+  `train_mfn_student_*` scripts, `evaluate_mfn_singlepath.py`, `evaluate_sface.py`) and their
+  one-off remote runners (`run_s2_w1_*.sh`, `run_stage80_*.sh`, `run_v2_lfw*.sh`,
+  `run_w115_*.sh`, `face_embedding_*.sh`) now live in `model_zoo/tflm_face_embedding/archive/`.
+  They are the superseded w600k 512D→128D compression line — kept for history, not for current use.
 
 ### Copying Firmware to ESP32 Project
 
