@@ -94,6 +94,27 @@ int cv_face_embedding_run_fixed_input_test(uint32_t seed);
 int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t input_bytes);
 
 /**
+ * @brief Run the full pipeline (SCRFD + alignment + MobileFaceNet) against a
+ *        YUV422 frame held in flash, standing in for the camera.
+ *
+ * Bypasses only the sensor and ISP, which makes it possible to tell an image
+ * quality problem apart from a detection, alignment, or NPU problem. The frame
+ * is read in place through the flash alias and costs no SRAM.
+ */
+int cv_face_embedding_run_flash_frame_test(uint32_t frame_flash_addr, uint32_t frame_width,
+                                           uint32_t frame_height,
+                                           struct_algoResult *alg_result,
+                                           face_embedding_msg_t *embedding_msg);
+
+/**
+ * @brief Borrow the last aligned 112x112 RGB888 face crop.
+ *
+ * This buffer lives outside the tensor arena, so unlike face_debug_tensors_t's
+ * emb_input_data it is still valid after Invoke() has run.
+ */
+int cv_face_embedding_get_aligned_crop(const uint8_t **out_data, uint32_t *out_bytes);
+
+/**
  * @brief Override face detection confidence threshold at runtime.
  *
  * Passing a value outside [0.01, 1.0] restores the build-time default.

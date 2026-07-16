@@ -1581,6 +1581,44 @@ int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t i
     return status == kTfLiteOk ? 0 : -2;
 }
 
+int cv_face_embedding_run_flash_frame_test(uint32_t frame_flash_addr, uint32_t frame_width,
+                                           uint32_t frame_height,
+                                           struct_algoResult *alg_result,
+                                           face_embedding_msg_t *embedding_msg)
+{
+    if (g_face_emb_init == 0 || alg_result == nullptr || embedding_msg == nullptr) {
+        return -1;
+    }
+    if (frame_width == 0 || frame_height == 0) {
+        return -3;
+    }
+
+    /* Hand cv_face_embedding_run() a pointer straight into the flash alias
+     * rather than staging the frame: a 240x240 YUV422 frame is 115 KB and
+     * CM55M_S_SRAM is already at 100%. The pipeline only reads frame_data, so
+     * XIP backing is enough. */
+    uint32_t flash_offset = frame_flash_addr;
+    if (flash_offset >= BASE_ADDR_FLASH1_R_ALIAS) {
+        flash_offset -= BASE_ADDR_FLASH1_R_ALIAS;
+    }
+    uint8_t *frame = (uint8_t *)(BASE_ADDR_FLASH1_R_ALIAS + flash_offset);
+
+    return cv_face_embedding_run(frame, frame_width, frame_height, alg_result, embedding_msg);
+}
+
+int cv_face_embedding_get_aligned_crop(const uint8_t **out_data, uint32_t *out_bytes)
+{
+    if (out_data == nullptr || out_bytes == nullptr) {
+        return -1;
+    }
+    if (g_face_emb_init == 0 || aligned_face_img == 0) {
+        return -2;
+    }
+    *out_data  = (const uint8_t *)aligned_face_img;
+    *out_bytes = (uint32_t)aligned_face_buffer_size;
+    return 0;
+}
+
 int cv_face_embedding_set_conf_threshold(float threshold)
 {
     if (threshold < 0.01f || threshold > 1.0f) {
