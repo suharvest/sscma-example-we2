@@ -33,78 +33,60 @@ void compute_face_alignment(
     if (landmarks == NULL || transform == NULL) return;
 
     /*
-     * Compute similarity transform using eye positions.
+     * Least-squares similarity transform over all 5 landmarks (the standard
+     * ArcFace alignment, closed form, no SVD needed).
      *
-     * The similarity transform has 4 DOF:
-     * - 1 rotation angle
-     * - 1 uniform scale
-     * - 2 translation (x, y)
+     * The earlier version solved the transform from the two eyes alone. Two
+     * points only pin down roll, so any out-of-plane yaw or a noisy single
+     * landmark left the crop tilted or off-centre -- exactly the "face isn't
+     * upright" symptom. Fitting all 5 points (eyes, nose, mouth corners)
+     * distributes landmark noise and frames the face the way the reference
+     * template expects.
      *
-     * We use the eye positions as the primary alignment reference
-     * since they provide the most stable features.
+     * For src_i -> dst_i we minimise sum|dst_i - (s*R*src_i + t)|^2 with a 2D
+     * similarity (rotation + uniform scale + translation):
+     *   sx = src - mean(src),  dx = dst - mean(dst)
+     *   a = sum(dx.x*sx.x + dx.y*sx.y),  b = sum(dx.y*sx.x - dx.x*sx.y)
+     *   d = sum(sx.x^2 + sx.y^2)
+     *   s*R = (1/d) * [[a, -b], [b, a]],  t = mean(dst) - s*R*mean(src)
      */
+    const int N = SCRFD_NUM_LANDMARKS;
 
-    /* Source eye positions (from detection) */
-    float src_left_eye_x = landmarks[SCRFD_LM_LEFT_EYE].x;
-    float src_left_eye_y = landmarks[SCRFD_LM_LEFT_EYE].y;
-    float src_right_eye_x = landmarks[SCRFD_LM_RIGHT_EYE].x;
-    float src_right_eye_y = landmarks[SCRFD_LM_RIGHT_EYE].y;
+    float src_mx = 0.0f, src_my = 0.0f, dst_mx = 0.0f, dst_my = 0.0f;
+    for (int i = 0; i < N; i++) {
+        src_mx += landmarks[i].x;          src_my += landmarks[i].y;
+        dst_mx += REFERENCE_LANDMARKS[i].x; dst_my += REFERENCE_LANDMARKS[i].y;
+    }
+    src_mx /= N; src_my /= N; dst_mx /= N; dst_my /= N;
 
-    /* Source eye center */
-    float src_eye_center_x = (src_left_eye_x + src_right_eye_x) / 2.0f;
-    float src_eye_center_y = (src_left_eye_y + src_right_eye_y) / 2.0f;
+    float a = 0.0f, b = 0.0f, d = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float sx = landmarks[i].x - src_mx;
+        float sy = landmarks[i].y - src_my;
+        float dx = REFERENCE_LANDMARKS[i].x - dst_mx;
+        float dy = REFERENCE_LANDMARKS[i].y - dst_my;
+        a += dx * sx + dy * sy;
+        b += dy * sx - dx * sy;
+        d += sx * sx + sy * sy;
+    }
 
-    /* Source inter-ocular vector */
-    float src_dx = src_right_eye_x - src_left_eye_x;
-    float src_dy = src_right_eye_y - src_left_eye_y;
-    float src_dist = sqrtf(src_dx * src_dx + src_dy * src_dy);
+    if (d < 1e-6f) {
+        /* Degenerate landmarks (all coincident); fall back to identity. */
+        transform->m[0] = 1.0f; transform->m[1] = 0.0f; transform->m[2] = 0.0f;
+        transform->m[3] = 0.0f; transform->m[4] = 1.0f; transform->m[5] = 0.0f;
+        return;
+    }
 
-    /* Destination (reference) eye positions */
-    float dst_left_eye_x = REFERENCE_LANDMARKS[SCRFD_LM_LEFT_EYE].x;
-    float dst_left_eye_y = REFERENCE_LANDMARKS[SCRFD_LM_LEFT_EYE].y;
-    float dst_right_eye_x = REFERENCE_LANDMARKS[SCRFD_LM_RIGHT_EYE].x;
-    float dst_right_eye_y = REFERENCE_LANDMARKS[SCRFD_LM_RIGHT_EYE].y;
+    float sc  = a / d;   /* s * cos(theta) */
+    float ss  = b / d;   /* s * sin(theta) */
 
-    /* Destination eye center */
-    float dst_eye_center_x = (dst_left_eye_x + dst_right_eye_x) / 2.0f;
-    float dst_eye_center_y = (dst_left_eye_y + dst_right_eye_y) / 2.0f;
+    transform->m[0] = sc;
+    transform->m[1] = -ss;
+    transform->m[2] = dst_mx - (sc * src_mx - ss * src_my);
 
-    /* Destination inter-ocular vector */
-    float dst_dx = dst_right_eye_x - dst_left_eye_x;
-    float dst_dy = dst_right_eye_y - dst_left_eye_y;
-    float dst_dist = sqrtf(dst_dx * dst_dx + dst_dy * dst_dy);
-
-    /* Compute scale factor */
-    float scale = dst_dist / (src_dist + 1e-6f);
-
-    /* Compute rotation angle */
-    float src_angle = atan2f(src_dy, src_dx);
-    float dst_angle = atan2f(dst_dy, dst_dx);
-    float angle = dst_angle - src_angle;
-
-    /* Rotation matrix components (with scale) */
-    float cos_a = cosf(angle) * scale;
-    float sin_a = sinf(angle) * scale;
-
-    /*
-     * Build affine transformation matrix.
-     *
-     * The transform maps source coordinates to destination:
-     *   x' = cos_a * (x - cx_src) - sin_a * (y - cy_src) + cx_dst
-     *   y' = sin_a * (x - cx_src) + cos_a * (y - cy_src) + cy_dst
-     *
-     * Expanding:
-     *   x' = cos_a * x - sin_a * y + (cx_dst - cos_a * cx_src + sin_a * cy_src)
-     *   y' = sin_a * x + cos_a * y + (cy_dst - sin_a * cx_src - cos_a * cy_src)
-     */
-
-    transform->m[0] = cos_a;
-    transform->m[1] = -sin_a;
-    transform->m[2] = dst_eye_center_x - cos_a * src_eye_center_x + sin_a * src_eye_center_y;
-
-    transform->m[3] = sin_a;
-    transform->m[4] = cos_a;
-    transform->m[5] = dst_eye_center_y - sin_a * src_eye_center_x - cos_a * src_eye_center_y;
+    transform->m[3] = ss;
+    transform->m[4] = sc;
+    transform->m[5] = dst_my - (ss * src_mx + sc * src_my);
 }
 
 void invert_affine_transform(
