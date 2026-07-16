@@ -1555,10 +1555,28 @@ int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t i
     if (flash_offset >= BASE_ADDR_FLASH1_R_ALIAS) {
         flash_offset -= BASE_ADDR_FLASH1_R_ALIAS;
     }
-    int read_ret = hx_lib_qspi_eeprom_4read(flash_offset, emb_input_data, input_bytes);
-    if (read_ret != 0) {
-        memcpy(emb_input_data, (const void *)input_flash_addr, input_bytes);
+    /* Read through the memory-mapped alias, the way GetModel() reaches the
+     * SCRFD/MobileFaceNet weights. hx_lib_qspi_eeprom_4read() returns 0 here
+     * without ever writing the buffer, so the fallback below never fired and
+     * every offset silently produced the embedding of the freshly-reset arena.
+     * The CPU copy also leaves the bytes in dcache, which is what invoke's
+     * clean_dcache_range() expects to flush. */
+    const uint8_t *src = (const uint8_t *)(BASE_ADDR_FLASH1_R_ALIAS + flash_offset);
+    memcpy(emb_input_data, src, input_bytes);
+
+    /* Unconditional: a silent wrong-address read is exactly the failure this
+     * command is used to rule out, so it must always report what it read. */
+    {
+        const int8_t *d = (const int8_t *)emb_input_data;
+        xprintf("[FACEEMBFLASH] arg=0x%08X off=0x%08X src=0x%08X dst=0x%08X n=%u\n",
+                input_flash_addr, flash_offset, (uint32_t)(uintptr_t)src,
+                (uint32_t)(uintptr_t)emb_input_data, input_bytes);
+        xprintf("[FACEEMBFLASH] src[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]);
+        xprintf("[FACEEMBFLASH] dst[0..7]=%d %d %d %d %d %d %d %d\n",
+                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
     }
+
     TfLiteStatus status = invoke_mobilefacenet_from_current_input();
     return status == kTfLiteOk ? 0 : -2;
 }
