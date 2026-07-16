@@ -99,6 +99,14 @@ MOBILEFACENET_INT8_TFLITE = (
     SCRIPT_DIR / "foamliu_mobilefacenet_128d" / "foamliu_mobilefacenet_128d_qat_int8.tflite"
 )
 
+# DEPLOYED model — the pre-Vela INT8 twin of what the device flashes at 0x510000
+# (qat_distill_v2_relu6_128d). Use this so PC embeddings match the device
+# (on-device Vela reproduces this model to cos 0.99). Input zp=-1 scale 0.00784
+# (same as firmware pixel-129), output 128D int8 zp=18 scale 0.01266.
+DEPLOYED_EMBEDDING_TFLITE = (
+    SCRIPT_DIR / "qat_distill_v2_relu6_128d" / "model_128d.int8.tflite"
+)
+
 # ONNX fallbacks (float32)
 SCRFD_ONNX = SCRIPT_DIR / "scrfd" / "models" / "scrfd_500m_kps.onnx"
 MOBILEFACENET_ONNX = SCRIPT_DIR / "foamliu_mobilefacenet_128d" / "foamliu_mobilefacenet_128d.onnx"
@@ -1131,7 +1139,7 @@ def main():
     # Resolve models
     if args.backend == "tflite":
         scrfd_model = args.scrfd_model or str(SCRFD_TFLITE)
-        emb_model = args.embedding_model or str(MOBILEFACENET_FLOAT32_TFLITE)
+        emb_model = args.embedding_model or str(DEPLOYED_EMBEDDING_TFLITE)
     else:
         scrfd_model = args.scrfd_model or str(SCRFD_ONNX)
         emb_model = args.embedding_model or str(MOBILEFACENET_ONNX)

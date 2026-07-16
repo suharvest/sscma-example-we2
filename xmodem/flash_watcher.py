@@ -83,7 +83,7 @@ DEFAULT_MODELS_DIR = PROJECT_ROOT / "model_zoo/tflm_face_embedding"
 
 # Model files - use model_zoo reference models
 DEFAULT_SCRFD_MODEL = DEFAULT_MODELS_DIR / "scrfd/models/scrfd_500m_kps_int8_vela.tflite"
-DEFAULT_FACENET_MODEL = DEFAULT_MODELS_DIR / "training/output/qat_distilled_128d/model_distilled_qat.int8_vela.tflite"
+DEFAULT_FACENET_MODEL = DEFAULT_MODELS_DIR / "qat_distill_v2_relu6_128d/model_128d.int8_vela.tflite"
 DEFAULT_YOLO_MODEL = PROJECT_ROOT / "model_zoo/sscma/swift_yolo_nano_person_192_int8_vela.tflite"
 
 # Flash addresses for models (must match common_config.h)

@@ -98,3 +98,9 @@ model_zoo/tflm_face_embedding/official_mobilefacenet/width_probe/
 artifacts/
 # stray root-level tflite exports
 /w600k_stage96_pairft.*.tflite
+
+# Deployed face embedding model (QAT distill_v2 ReLU6 128D) — versioned on purpose.
+# The previous deployed model was silently caught by *.tflite above and never
+# committed, so firmware could not be rebuilt from a clean checkout. Keep this one.
+!model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/
+!model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/*.tflite

@@ -20,7 +20,10 @@ OUTPUT_IMG="${PROJECT_ROOT}/we2_image_gen_local/output_case1_sec_wlcsp/output.im
 # Model paths
 SCRFD_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite"
 SCRFD_ADDR="0x400000"
-EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/training/output/qat_distilled_128d/model_distilled_qat.int8_vela.tflite"
+# QAT distill_v2 ReLU6 128D — replaces the weak qat_distilled_128d (w600k PCA) model.
+# On-device stranger impostor 0.25 -> 0.045. See the model dir's README; set the
+# host-side cosine match threshold to ~0.30 (was 0.4) for this model.
+EMBEDDING_MODEL="${PROJECT_ROOT}/model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/model_128d.int8_vela.tflite"
 EMBEDDING_ADDR="0x510000"
 
 # Serial port (auto-detect)

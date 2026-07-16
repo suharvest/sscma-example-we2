@@ -51,7 +51,10 @@ from compute_embedding import (
 )
 
 DEFAULT_DB = SCRIPT_DIR / "face_database.json"
-DEFAULT_THRESHOLD = 0.45
+# Deployed model = qat_distill_v2_relu6_128d: impostors sit near 0, genuine near
+# 0.6, so ~0.30 cleanly separates (genuine p5 0.385 > 0.30 > impostor p99 0.231).
+# The old models needed ~0.45; keep them in mind if pointing this at an old model.
+DEFAULT_THRESHOLD = 0.30
 
 
 class FaceDatabase:
