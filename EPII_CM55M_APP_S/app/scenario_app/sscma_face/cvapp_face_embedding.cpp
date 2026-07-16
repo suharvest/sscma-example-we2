@@ -1235,6 +1235,20 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         return 0;
     }
 
+    /* Quality gate: reject strong out-of-plane yaw before spending the align +
+     * MobileFaceNet cost on a face the 2-point alignment cannot straighten. The
+     * threshold is deliberately conservative (only clear profiles fall below it)
+     * because it has not been swept on-device yet -- use AT+FACEFRAME with
+     * known-yaw frames to calibrate MIN_FACE_QUALITY before tightening it. */
+    float face_quality = estimate_face_quality(best_face->landmarks);
+    if (face_quality < MIN_FACE_QUALITY) {
+        DBG_INFO("  Face quality too low: %d/100 (min %d)\n",
+                 (int)(face_quality * 100), (int)(MIN_FACE_QUALITY * 100));
+        alg_result->num_tracked_human_targets = 0;
+        scrfd_free_dets(faces);
+        return 0;
+    }
+
 #if TOTAL_STEP_TICK
     uint32_t systick_post, loop_cnt_post;
     SystemGetTick(&systick_post, &loop_cnt_post);
@@ -1360,7 +1374,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     embedding_msg->timestamp = loop_cnt * CPU_CLK + systick;
 
     embedding_msg->confidence = best_face->score;
-    embedding_msg->quality = estimate_face_quality(best_face->landmarks);
+    embedding_msg->quality = face_quality;  /* computed at the quality gate above */
 
     embedding_msg->bbox.x = (uint16_t)best_face->bbox.x;
     embedding_msg->bbox.y = (uint16_t)best_face->bbox.y;

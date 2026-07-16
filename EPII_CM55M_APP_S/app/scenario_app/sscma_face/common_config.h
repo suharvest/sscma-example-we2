@@ -160,8 +160,11 @@
 #define MAX_PITCH_ANGLE                 45.0f   /* Up-down rotation limit */
 #define MAX_ROLL_ANGLE                  45.0f   /* In-plane rotation limit */
 
-/* Face quality threshold */
-#define MIN_FACE_QUALITY                0.3f    /* Minimum quality score for recognition */
+/* Face quality gate (yaw-based, see estimate_face_quality in face_alignment.c).
+ * quality = 1.0 frontal .. 0.0 at ~45deg profile. 0.3 rejects roughly >40deg yaw,
+ * which the eyes-only alignment cannot straighten. Conservative until swept on
+ * device with AT+FACEFRAME known-yaw frames; raise it once calibrated. */
+#define MIN_FACE_QUALITY                0.3f
 
 /* UART communication */
 #define DATA_TYPE_FACE_EMBEDDING        0xA0

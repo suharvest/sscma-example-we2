@@ -236,29 +236,37 @@ void apply_face_alignment(
 float estimate_face_quality(const scrfd_point2f* landmarks) {
     if (landmarks == NULL) return 0.0f;
 
-    float quality = 1.0f;
+    /* Roll is deliberately NOT scored. compute_face_alignment() rotates the face
+     * upright from the eye vector, so in-plane tilt is fully corrected before the
+     * crop reaches the model -- penalising it here punishes something the very
+     * next stage undoes. What the eyes-only (2-point) similarity transform CANNOT
+     * remove is out-of-plane yaw, so that is what quality measures.
+     *
+     * The previous version multiplied a roll term, a yaw term and a harsh mouth
+     * term together; a normal frontal face scored ~0.07, far below the (never
+     * wired) MIN_FACE_QUALITY gate. */
+    const scrfd_point2f* le = &landmarks[SCRFD_LM_LEFT_EYE];
+    const scrfd_point2f* re = &landmarks[SCRFD_LM_RIGHT_EYE];
+    float eye_dx = re->x - le->x;
+    float eye_dy = re->y - le->y;
+    float interocular = sqrtf(eye_dx * eye_dx + eye_dy * eye_dy);  /* roll-invariant */
+    if (interocular < 1.0f) return 0.0f;
 
-    /* 1. Eye horizontal alignment (roll check) */
-    float eye_dy = fabsf(landmarks[SCRFD_LM_LEFT_EYE].y - landmarks[SCRFD_LM_RIGHT_EYE].y);
-    float eye_dx = fabsf(landmarks[SCRFD_LM_LEFT_EYE].x - landmarks[SCRFD_LM_RIGHT_EYE].x);
-    float roll_ratio = eye_dy / (eye_dx + 1e-6f);
-    float roll_score = fmaxf(0.0f, 1.0f - roll_ratio * 3.0f);
-    quality *= roll_score;
+    float eye_cx = (le->x + re->x) * 0.5f;
 
-    /* 2. Nose position symmetry (yaw check) */
-    float eye_center_x = (landmarks[SCRFD_LM_LEFT_EYE].x + landmarks[SCRFD_LM_RIGHT_EYE].x) / 2.0f;
-    float nose_offset = fabsf(landmarks[SCRFD_LM_NOSE].x - eye_center_x);
-    float nose_range = eye_dx / 2.0f;
-    float yaw_score = fmaxf(0.0f, 1.0f - nose_offset / (nose_range + 1e-6f));
-    quality *= yaw_score;
+    /* Nose horizontal offset from the eye centre is the primary yaw proxy; the
+     * mouth centre offset confirms it at quarter weight. Both are normalised by
+     * the interocular distance so the score is scale invariant. */
+    float nose_off  = fabsf(landmarks[SCRFD_LM_NOSE].x - eye_cx) / interocular;
+    float mouth_cx  = (landmarks[SCRFD_LM_LEFT_MOUTH].x + landmarks[SCRFD_LM_RIGHT_MOUTH].x) * 0.5f;
+    float mouth_off = fabsf(mouth_cx - eye_cx) / interocular;
 
-    /* 3. Mouth symmetry */
-    float mouth_center_x = (landmarks[SCRFD_LM_LEFT_MOUTH].x + landmarks[SCRFD_LM_RIGHT_MOUTH].x) / 2.0f;
-    float mouth_offset = fabsf(mouth_center_x - eye_center_x);
-    float mouth_score = fmaxf(0.0f, 1.0f - mouth_offset / (nose_range + 1e-6f));
-    quality *= mouth_score;
+    /* Frontal keeps both offsets near 0 -> quality ~1. A ~45 deg profile pushes
+     * the nose offset past ~0.5 -> quality ~0. */
+    float yaw = 0.75f * nose_off + 0.25f * mouth_off;
+    float quality = 1.0f - 1.5f * yaw;
 
-    return quality;
+    return fmaxf(0.0f, fminf(1.0f, quality));
 }
 
 void estimate_face_pose(
