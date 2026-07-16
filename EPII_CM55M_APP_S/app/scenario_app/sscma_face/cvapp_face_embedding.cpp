@@ -384,12 +384,12 @@ static TfLiteStatus invoke_mobilefacenet_from_current_input()
 #endif
     static bool s_first_emb_invoke = true;
     if (s_first_emb_invoke) {
-        xprintf("[FACE-RUN +%ums] first MobileFaceNet Invoke() start\n",
+        DBG_INFO("[FACE-RUN +%ums] first MobileFaceNet Invoke() start\n",
                 (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
     }
     TfLiteStatus invoke_status = emb_int_ptr->Invoke();
     if (s_first_emb_invoke) {
-        xprintf("[FACE-RUN +%ums] first MobileFaceNet Invoke() done\n",
+        DBG_INFO("[FACE-RUN +%ums] first MobileFaceNet Invoke() done\n",
                 (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
         s_first_emb_invoke = false;
     }
@@ -544,16 +544,16 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * freshly reset arena — see fd_interp_storage / s_interp_constructed. */
 
     g_face_init_t0_ms = el_get_time_ms();
-    xprintf("[FACE-INIT +%ums] Face Embedding Init...\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] Face Embedding Init...\n", face_init_ms());
 
     /*
      * Memory allocation - reset elHeap bump allocator to reclaim memory used by
      * sscma_micro's YOLO tensor arena (1110 KB), then allocate face buffers.
      * This is safe because face mode doesn't use sscma_micro's standard model.
      */
-    xprintf("[FACE-INIT +%ums] el_aligned_malloc_reset()...\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] el_aligned_malloc_reset()...\n", face_init_ms());
     el_aligned_malloc_reset();
-    xprintf("[FACE-INIT +%ums] reset done; allocating face buffers\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] reset done; allocating face buffers\n", face_init_ms());
     void* fd_arena = el_aligned_malloc_once(32, scrfd_arena_size);
     void* emb_arena = el_aligned_malloc_once(32, mobilefacenet_arena_size);
     void* buf1 = el_aligned_malloc_once(32, fd_resize_image_size);
@@ -572,18 +572,18 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
     fd_resized_img = (uint32_t)buf1;
     aligned_face_img = (uint32_t)buf2;
 
-    xprintf("[FACE-INIT +%ums] face buffers allocated from elHeap\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] face buffers allocated from elHeap\n", face_init_ms());
 
     /* NOTE: NPU initialization is completely SKIPPED here because sscma_micro
      * (el_device_we2.cpp) already initializes the Ethos-U55 NPU at device startup.
      */
 
     /* Load models from flash */
-    xprintf("[FACE-INIT +%ums] GetModel SCRFD@0x%08X emb@0x%08X...\n",
+    DBG_INFO("[FACE-INIT +%ums] GetModel SCRFD@0x%08X emb@0x%08X...\n",
             face_init_ms(), fd_model_addr, embedding_model_addr);
     static const tflite::Model *fd_model = tflite::GetModel((const void *)fd_model_addr);
     static const tflite::Model *emb_model = tflite::GetModel((const void *)embedding_model_addr);
-    xprintf("[FACE-INIT +%ums] GetModel done\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] GetModel done\n", face_init_ms());
 
     /* Model Integrity Check - silent on success */
     uint8_t* scrfd_bytes = (uint8_t*)fd_model_addr;
@@ -649,7 +649,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         s_op_resolver_ready = true;
     }
 
-    xprintf("[FACE-INIT +%ums] op_resolver ready; constructing interpreters\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] op_resolver ready; constructing interpreters\n", face_init_ms());
 
     /* Create interpreters */
 
@@ -671,7 +671,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * MicroInterpreter owns no heap resources (everything lives in the arena),
      * so placement-new-ing over the clobbered storage is leak-free and skips the
      * only line that reads corrupted memory. */
-    xprintf("[FACE-INIT +%ums] pre-construct\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] pre-construct\n", face_init_ms());
 #if TFLM2209_U55TAG2205
     static tflite::MicroErrorReporter micro_error_reporter;
     fd_int_ptr = new (fd_interp_storage) tflite::MicroInterpreter(
@@ -691,7 +691,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
         (uint8_t *)mobilefacenet_tensor_arena, mobilefacenet_arena_size);
 #endif
     s_interp_constructed = true;
-    xprintf("[FACE-INIT +%ums] post-construct\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] post-construct\n", face_init_ms());
 
     /* Allocate tensors — the two Ethos-U AllocateTensors calls are the only
      * long CPU-blocking steps of init and cannot feed the watchdog while
@@ -702,24 +702,24 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * both models are ready, so the load cannot be interrupted no matter how
      * long it takes. */
     face_wdt_disable();
-    xprintf("[FACE-INIT +%ums] WDT stopped; SCRFD AllocateTensors() start\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] WDT stopped; SCRFD AllocateTensors() start\n", face_init_ms());
     if (fd_int_ptr->AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: SCRFD tensor allocation failed\n");
         face_wdt_rearm();
         return -26;
     }
-    xprintf("[FACE-INIT +%ums] SCRFD AllocateTensors() done; FaceNet AllocateTensors() start\n",
+    DBG_INFO("[FACE-INIT +%ums] SCRFD AllocateTensors() done; FaceNet AllocateTensors() start\n",
             face_init_ms());
     if (emb_int_ptr->AllocateTensors() != kTfLiteOk) {
         xprintf("ERROR: MobileFaceNet tensor allocation failed\n");
         face_wdt_rearm();
         return -27;
     }
-    xprintf("[FACE-INIT +%ums] FaceNet AllocateTensors() done\n", face_init_ms());
-    xprintf("[FACE-INIT +%ums] tensors-allocated\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] FaceNet AllocateTensors() done\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] tensors-allocated\n", face_init_ms());
     /* Models allocated — re-arm the hardware watchdog (3s RESET). */
     face_wdt_rearm();
-    xprintf("[FACE-INIT +%ums] WDT re-armed (3s RESET)\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] WDT re-armed (3s RESET)\n", face_init_ms());
     /* Setup SCRFD interpreter (fd_int_ptr already set by placement-new above) */
     fd_input = fd_int_ptr->input(0);
 
@@ -844,13 +844,13 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
     }
 
 #if FACE_DEBUG_MEMORY_LAYOUT
-    xprintf("[FACE-MEM] fd_arena=0x%08X size=%d emb_arena=0x%08X size=%d\n",
+    DBG_INFO("[FACE-MEM] fd_arena=0x%08X size=%d emb_arena=0x%08X size=%d\n",
             scrfd_tensor_arena, scrfd_arena_size,
             mobilefacenet_tensor_arena, mobilefacenet_arena_size);
-    xprintf("[FACE-MEM] fd_resize=0x%08X size=%d align=0x%08X size=%d\n",
+    DBG_INFO("[FACE-MEM] fd_resize=0x%08X size=%d align=0x%08X size=%d\n",
             fd_resized_img, fd_resize_image_size,
             aligned_face_img, aligned_face_buffer_size);
-    xprintf("[FACE-MEM] emb_input=0x%08X bytes=%u emb_output=0x%08X bytes=%u\n",
+    DBG_INFO("[FACE-MEM] emb_input=0x%08X bytes=%u emb_output=0x%08X bytes=%u\n",
             (uint32_t)emb_input_data, emb_input_bytes,
             (uint32_t)emb_output_data, emb_output_bytes);
 #endif
@@ -861,7 +861,7 @@ int cv_face_embedding_init(bool security_enable, bool privilege_enable,
      * then passes YUV422P data here. We convert to RGB888 using el_img_convert(). */
 
     g_face_emb_init = 1;
-    xprintf("[FACE-INIT +%ums] Face init OK\n", face_init_ms());
+    DBG_INFO("[FACE-INIT +%ums] Face init OK\n", face_init_ms());
 
     return 0;
 }
@@ -1022,7 +1022,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
     clean_dcache_range(fd_input->data.data, fd_input->bytes);
 
     if (frame_count == 1) {
-        xprintf("[FACE-RUN +%ums] frame 1: SCRFD Invoke() start\n",
+        DBG_INFO("[FACE-RUN +%ums] frame 1: SCRFD Invoke() start\n",
                 (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
     }
     invoke_status = fd_int_ptr->Invoke();
@@ -1031,7 +1031,7 @@ int cv_face_embedding_run(uint8_t *frame_data, uint32_t frame_width, uint32_t fr
         return -1;
     }
     if (frame_count == 1) {
-        xprintf("[FACE-RUN +%ums] frame 1: SCRFD Invoke() done\n",
+        DBG_INFO("[FACE-RUN +%ums] frame 1: SCRFD Invoke() done\n",
                 (uint32_t)(el_get_time_ms() - g_face_init_t0_ms));
     }
 
@@ -1582,12 +1582,12 @@ int cv_face_embedding_run_flash_input_test(uint32_t input_flash_addr, uint32_t i
      * command is used to rule out, so it must always report what it read. */
     {
         const int8_t *d = (const int8_t *)emb_input_data;
-        xprintf("[FACEEMBFLASH] arg=0x%08X off=0x%08X src=0x%08X dst=0x%08X n=%u\n",
+        DBG_VERBOSE("[FACEEMBFLASH] arg=0x%08X off=0x%08X src=0x%08X dst=0x%08X n=%u\n",
                 input_flash_addr, flash_offset, (uint32_t)(uintptr_t)src,
                 (uint32_t)(uintptr_t)emb_input_data, input_bytes);
-        xprintf("[FACEEMBFLASH] src[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+        DBG_VERBOSE("[FACEEMBFLASH] src[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
                 src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]);
-        xprintf("[FACEEMBFLASH] dst[0..7]=%d %d %d %d %d %d %d %d\n",
+        DBG_VERBOSE("[FACEEMBFLASH] dst[0..7]=%d %d %d %d %d %d %d %d\n",
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
     }
 
