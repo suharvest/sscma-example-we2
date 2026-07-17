@@ -1,5 +1,12 @@
 # Face Recognition Debug Tool
 
+> ⚠️ **DEPRECATED / 已过时**: this web tool targets the old `tflm_face_recognition`
+> app + GhostFaceNet 512D pipeline (Track B), which has been superseded by the
+> `sscma_face` app + QAT distill_v2 ReLU6 128D model. Its 512D embeddings and
+> 0.6 match threshold do **not** apply to the current system (128D, host
+> threshold ~0.30). Kept for reference; see
+> `model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/README.md`.
+
 Web-based debug tool for Grove Vision AI Module V2 face recognition system.
 
 ## Features

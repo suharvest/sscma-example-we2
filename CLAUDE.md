@@ -645,8 +645,13 @@ The script automatically:
 4. Auto-detects USB serial port on macOS
 
 **Model Configuration (in build_and_flash.sh):**
-- SCRFD model: `model_zoo/tflm_face_recognition/scrfd_500m_kps_int8_vela.tflite` @ 0x200000
-- GhostFaceNet model: `model_zoo/tflm_face_recognition/ghostfacenet_0.5_112_int8_vela.tflite` @ 0x400000
+- SCRFD model: `model_zoo/tflm_face_embedding/scrfd/models/scrfd_500m_kps_int8_vela.tflite` @ 0x400000
+- MobileFaceNet: `model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/model_128d.int8_vela.tflite` @ 0x510000
+
+> **Deprecated:** the earlier GhostFaceNet 512D line (`tflm_face_recognition`
+> app + `tools/face_recognition_debug/`) is superseded by the `sscma_face` app
+> with the QAT distill_v2 ReLU6 128D model above. See
+> `model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/README.md`.
 
 ### Workflow: Quick Test of Existing Example (Manual)
 ```bash

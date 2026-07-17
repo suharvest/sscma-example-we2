@@ -1,5 +1,12 @@
 # Face Recognition 数据路径文档
 
+> ⚠️ **已过时 / DEPRECATED**：本文档描述的是旧的 `tflm_face_recognition` app +
+> GhostFaceNet 512D 方案（Track B），该 scenario app 已移除。当前生产方案是
+> `sscma_face` app + QAT distill_v2 ReLU6 128D 模型（见
+> `model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/README.md`）。
+> 本文保留作历史参考——SCRFD 检测/坐标转换的数据路径思路仍有借鉴价值，但其中
+> 的 app 路径、512D embedding、匹配阈值均不代表现行系统。
+
 本文档详细描述了从视频采集到前端渲染的完整数据路径，用于调试 bbox/landmark 与视频不对齐问题。
 
 ## 目录
