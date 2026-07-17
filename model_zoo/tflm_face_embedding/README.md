@@ -1,5 +1,22 @@
 # Face Embedding Models for Grove Vision AI V2
 
+> **⚠️ Currently deployed model (read this first).**
+> The face embedding model in production for `sscma_face` is
+> **[`qat_distill_v2_relu6_128d/`](qat_distill_v2_relu6_128d/README.md)** — a QAT
+> distill_v2 ReLU6 MobileFaceNet (112×112×3 int8 in, 128D int8 out, flashed to
+> `0x510000`). It is a drop-in replacement for the old `qat_distilled_128d`
+> (w600k-line PCA) model and pushes stranger/impostor similarity to ~0.
+> Accuracy (int8): LFW 99.33% / CFP-FP 94.26%; on-device impostor ~0.045.
+> **The host-side cosine match threshold is now ~0.30 (was ~0.4).**
+>
+> The production training/export flow lives in **`qat_pipeline/`**.
+>
+> Everything below (w600k / foamliu / GhostFaceNet / S2-student / projection
+> experiments) is historical exploration that led to the current model and is
+> **outdated** — many of those scripts now live under **`archive/`**. Keep them for
+> context, but do not treat their conclusions (e.g. "keep w600k", "keep tpair_hn_a",
+> the 0.4/0.5 thresholds) as current.
+
 Face detection (SCRFD) + Face embedding (GhostFaceNet/MobileFaceNet) for Ethos-U55 NPU.
 
 ## Final Models (Ready to Flash)

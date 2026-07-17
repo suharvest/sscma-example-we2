@@ -7,7 +7,7 @@ This scenario app extends SSCMA with face recognition capabilities for the Sense
 - Standard SSCMA AT command interface for object detection
 - `AT+FACE=1` command to enable face recognition mode
 - Face detection using SCRFD_500M_KPS (160x160)
-- 128D face embedding using MobileFaceNet (112x112)
+- 128D face embedding using QAT distill_v2 ReLU6 MobileFaceNet (112x112)
 - Face alignment using 5-point landmarks
 - JPEG image output for remote preview
 - Compatible with ESP32 face database for recognition
@@ -127,13 +127,34 @@ INVOKE format with `faces[]` (includes embedding, landmarks, quality):
 | Address | Model | Size |
 |---------|-------|------|
 | 0x400000 | SCRFD_500M_KPS | ~700 KB |
-| 0x510000 | MobileFaceNet distilled QAT 128D | ~1.26 MB |
+| 0x510000 | QAT distill_v2 ReLU6 MobileFaceNet 128D | ~1008 KB |
+
+The 128D embedding model is a drop-in replacement (112×112×3 int8 input, 128D int8
+output), so the firmware needs no code change to adopt it — just reflash the
+`0x510000` slot. See
+`model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/README.md` for provenance,
+accuracy, and the host-side match threshold.
 
 ## Memory Usage
 
 - SCRFD arena: 220 KB
-- MobileFaceNet arena: 620 KB reserved (Vela reports 599 KiB)
+- Embedding-model arena: 620 KB reserved (Vela reports 596.84 KiB)
 - Total: ~840 KB (allocated from EL_ALLOC region at runtime)
+
+## Face Matching and Enrollment
+
+The Himax firmware only produces embeddings; the cosine match/enrollment decision
+happens on the host (ESP32 / SBC) face database.
+
+- **Host-side cosine match threshold: ~0.30.** The deployed QAT distill_v2 model
+  centers stranger (impostor) similarity near 0 and genuine similarity near 0.6, so
+  the operating point moved down from the old model's ~0.4. Leaving the host
+  threshold at 0.4 falsely rejects some genuine matches.
+- **Enroll on-device.** Register faces from the device camera rather than uploaded
+  phone photos: the device-camera imaging domain differs from clean photos. The new
+  model narrows this cross-domain gap (genuine ~0.6), so photo enrollment is
+  becoming viable, but device-camera enrollment remains the recommended path —
+  validate with multiple people before relying on photo enrollment.
 
 ## Building
 
