@@ -5,7 +5,7 @@
  *
  * Models:
  *   - SCRFD_500M_KPS: Face detection with 5-point landmarks
- *   - MobileFaceNet: QAT InsightFace w600k_mbf (128D output, ArcFace)
+ *   - MobileFaceNet: QAT distill_v2 ReLU6 (glint360k teacher, 128D output)
  *
  *  Created on: Dec 11, 2025
  *      Author: Face Embedding App
@@ -28,7 +28,7 @@
  * Memory layout (sscma_micro scans 0x400000-0xE00000):
  *   0x00000000 - 0x00200000: Firmware (2 MB)
  *   0x00400000 - 0x004B4000: SCRFD model (717 KB)         -> ID=1
- *   0x00510000 - 0x0064C000: MobileFaceNet distilled QAT 128D  -> ID=2
+ *   0x00510000 - 0x0064C000: MobileFaceNet QAT distill_v2 ReLU6 128D -> ID=2
  *   0x00700000 - 0x0089B000: Swift YOLO / test input area
  */
 #define SCRFD_MODEL_FLASH_ADDR          (BASE_ADDR_FLASH1_R_ALIAS + 0x400000)
@@ -60,18 +60,23 @@
 /*
  * MobileFaceNet Embedding Model Configuration
  *
- * distilled QAT 128D MobileFaceNet specifications:
- *   - Source: InsightFace w600k_mbf teacher, PCA 512->128D, QAT-distilled
+ * QAT distill_v2 ReLU6 128D MobileFaceNet
+ * (model_zoo/tflm_face_embedding/qat_distill_v2_relu6_128d/):
+ *   - Teacher: InsightFace glint360k_r100; student QAT-fine-tuned, LeakyReLU
+ *     swapped to ReLU6 (bounded activations keep discrimination through
+ *     Ethos-U55 per-tensor int8), 128D projection trained end-to-end.
  *   - Input: 112x112 RGB (aligned face, normalized to [-1,1])
- *   - Output: 128-dimensional embedding (L2 normalized)
- *   - Accuracy: LFW 99.15% / CFP-FP 91.56%
- *   - Vela: 599 KiB SRAM, ~1264 KiB flash, 100% NPU (63 ops, 0 CPU)
- *   - Inference: 100% NPU on Ethos-U55
+ *   - Output: 128-dimensional embedding (L2 normalized), int8 zp=18 scale~0.01266
+ *   - Accuracy (int8): LFW 99.33% / CFP-FP 94.26%; LFW impostor mean 0.005.
+ *     On-device stranger impostor ~0.045 (was ~0.25 with the old w600k model).
+ *   - Vela: 596.84 KiB SRAM, ~1008 KiB flash, 100% NPU (0 CPU ops)
+ *   - Host-side cosine match threshold ~0.30 (this model centers impostors at
+ *     ~0; the old model needed ~0.4). Enroll on-device, not from photos.
  */
 #define EMBEDDING_INPUT_WIDTH           112
 #define EMBEDDING_INPUT_HEIGHT          112
 #define EMBEDDING_INPUT_CHANNEL         3
-#define EMBEDDING_OUTPUT_DIM            128     /* QAT InsightFace w600k_mbf 128D embeddings */
+#define EMBEDDING_OUTPUT_DIM            128     /* QAT distill_v2 ReLU6 128D embedding */
 
 /*
  * Memory Configuration
@@ -89,7 +94,7 @@
  * bump only MOBILEFACENET_ARENA_SIZE first before changing the flashed model.
  */
 #define SCRFD_ARENA_SIZE                (220 * 1024)    /* 220 KB for face detection (Vela: 201 KB) */
-#define MOBILEFACENET_ARENA_SIZE        (620 * 1024)     /* distilled QAT 128D (Vela: 599 KiB) */
+#define MOBILEFACENET_ARENA_SIZE        (620 * 1024)     /* QAT distill_v2 ReLU6 128D (Vela: 597 KiB) */
 
 /* Legacy define for total reference */
 #define TENSOR_ARENA_SIZE               (SCRFD_ARENA_SIZE + MOBILEFACENET_ARENA_SIZE)
@@ -151,7 +156,7 @@
 #endif
 
 /* Face detection thresholds */
-#define FACE_CONF_THRESHOLD             0.50f   /* Confidence threshold doubles as quality gate: only high-score frontal faces pass. Calibrated from cross-domain data: score~45 -> cosine 0.27 (bad), score~79 -> cosine 0.44 (good). 0.50 rejects the low-quality edge frames so the embedding handed to the matcher is reliable. */
+#define FACE_CONF_THRESHOLD             0.50f   /* SCRFD detection score gate: only high-score frontal faces pass, so the embedding handed to the matcher comes from a clean crop. (An earlier comment tied specific cosine values to score here; those were the old w600k model's cross-domain figures and no longer apply to the QAT distill_v2 model.) */
 #define FACE_NMS_THRESHOLD              0.4f    /* NMS IoU threshold */
 #define MIN_FACE_SIZE                   40      /* Minimum face size in pixels */
 
