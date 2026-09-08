@@ -153,7 +153,7 @@ CUSTOMER ?= seeed
 # tflm_yolo11_od
 # tflm_yolov8_gender_cls
 ##
-APP_TYPE = sscma_face
+APP_TYPE = people_counting
  
 ### Options above must be added before include options.mk ###
 override EPII_ROOT := $(strip $(subst \,/,$(EPII_ROOT)))
